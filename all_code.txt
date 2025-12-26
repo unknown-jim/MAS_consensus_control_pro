@@ -1,108 +1,160 @@
 """
-配置文件 - 速度优化版
+配置文件 - 课程学习优化版（修复版）
 """
 import torch
 import random
 import numpy as np
 
-# ==========================================
-# 设备配置
-# ==========================================
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# ==========================================
-# 随机种子
-# ==========================================
+# ==================== 设备配置 ====================
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 SEED = 42
+TOPOLOGY_SEED = 42
 
-def set_seed(seed=SEED):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-# ==========================================
-# 系统配置
-# ==========================================
-NUM_FOLLOWERS = 9
+# ==================== 网络拓扑 ====================
+NUM_FOLLOWERS = 6
+NUM_PINNED = 2
 NUM_AGENTS = NUM_FOLLOWERS + 1
-LEADER_ID = 0
-STATE_DIM = 4
-HIDDEN_DIM = 128
-ACTION_DIM = 2
 
-# ==========================================
-# 环境配置
-# ==========================================
+# ==================== 环境参数 ====================
+STATE_DIM = 4
+ACTION_DIM = 2
 DT = 0.05
 MAX_STEPS = 300
-COMM_PENALTY = 0.1
 
 LEADER_AMPLITUDE = 2.0
 LEADER_OMEGA = 0.5
 LEADER_PHASE = 0.0
 
 POS_LIMIT = 10.0
-VEL_LIMIT = 5.0
+VEL_LIMIT = 10.0
 
-REWARD_MIN = -10.0
+# ==================== 课程学习参数（优化版）====================
+COMM_PENALTY_INIT = 0.0
+COMM_PENALTY_FINAL = 0.25
+COMM_PENALTY_WARMUP = 150
+COMM_PENALTY_ANNEAL = 200
+
+THRESHOLD_MIN_INIT = 0.005
+THRESHOLD_MAX_INIT = 0.05
+THRESHOLD_MIN_FINAL = 0.05
+THRESHOLD_MAX_FINAL = 0.40
+
+COMM_BONUS_INIT = 0.1
+COMM_BONUS_FINAL = 0.0
+
+COMM_PENALTY = COMM_PENALTY_INIT
+
+# ==================== 奖励参数 ====================
+REWARD_MIN = -2.0
 REWARD_MAX = 2.0
 USE_SOFT_REWARD_SCALING = True
 
-# ==========================================
-# SAC 超参数
-# ==========================================
-BUFFER_SIZE = 500000
-BATCH_SIZE = 512           #
+# ==================== SAC 参数 ====================
+LEARNING_RATE = 3e-4
+ACTOR_LR = 3e-4
+CRITIC_LR = 3e-4
+ALPHA_LR = 3e-4
+
 GAMMA = 0.99
 TAU = 0.005
-LEARNING_RATE = 3e-4
-ALPHA_LR = 3e-4
+
+INIT_ALPHA = 0.2
+AUTO_ALPHA = True
+TARGET_ENTROPY_RATIO = 0.5
+
+HIDDEN_DIM = 256
+BUFFER_SIZE = 500000
+BATCH_SIZE = 512
+GRADIENT_STEPS = 2
+
+# ==================== 网络参数 ====================
 LOG_STD_MIN = -20
 LOG_STD_MAX = 2
-INIT_ALPHA = 0.2
+U_SCALE = 5.0      # 🔧 控制输入缩放因子
+TH_SCALE = 0.8     # 🔧 阈值输出缩放因子
 
-# ==========================================
-# 训练配置 (速度优化) ⬇️ 关键修改
-# ==========================================
-NUM_EPISODES = 400
-VIS_INTERVAL = 20           # 减少可视化频率
-SAVE_MODEL_PATH = 'best_leader_follower_model.pth'
-
+# ==================== 训练参数 ====================
+NUM_EPISODES = 500
+VIS_INTERVAL = 10
 NUM_PARALLEL_ENVS = 32
 UPDATE_FREQUENCY = 4
-GRADIENT_STEPS = 4   
-
-# 混合精度
 USE_AMP = True
 
-# ==========================================
-# 拓扑配置
-# ==========================================
-NUM_PINNED = 3
-TOPOLOGY_SEED = 42
+SAVE_MODEL_PATH = 'best_model.pt'
+
+
+def get_comm_penalty(episode):
+    """获取当前 episode 的通信惩罚系数"""
+    if episode < COMM_PENALTY_WARMUP:
+        return COMM_PENALTY_INIT
+    elif episode < COMM_PENALTY_WARMUP + COMM_PENALTY_ANNEAL:
+        progress = (episode - COMM_PENALTY_WARMUP) / COMM_PENALTY_ANNEAL
+        return COMM_PENALTY_INIT + progress * (COMM_PENALTY_FINAL - COMM_PENALTY_INIT)
+    else:
+        return COMM_PENALTY_FINAL
+
+
+def get_curriculum_progress(episode):
+    """
+    获取课程学习进度 [0, 1]
+    """
+    total_curriculum = COMM_PENALTY_WARMUP + COMM_PENALTY_ANNEAL
+    if episode < COMM_PENALTY_WARMUP:
+        return 0.0
+    elif episode < total_curriculum:
+        return (episode - COMM_PENALTY_WARMUP) / COMM_PENALTY_ANNEAL
+    else:
+        return 1.0
+
+
+def get_threshold_bounds(episode):
+    """
+    获取当前 episode 的阈值边界
+    """
+    progress = get_curriculum_progress(episode)
+    
+    threshold_min = THRESHOLD_MIN_INIT + progress * (THRESHOLD_MIN_FINAL - THRESHOLD_MIN_INIT)
+    threshold_max = THRESHOLD_MAX_INIT + progress * (THRESHOLD_MAX_FINAL - THRESHOLD_MAX_INIT)
+    
+    return threshold_min, threshold_max
+
+
+def get_comm_bonus(episode):
+    """
+    获取当前 episode 的通信奖励系数
+    """
+    progress = get_curriculum_progress(episode)
+    return COMM_BONUS_INIT * (1.0 - progress)
+
+
+def set_seed(seed=SEED):
+    """设置全局随机种子"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 def print_config():
-    # 计算每 episode 的更新次数
-    updates_per_ep = MAX_STEPS // UPDATE_FREQUENCY
-    total_gradient_steps = updates_per_ep * GRADIENT_STEPS
-    
+    """打印配置信息"""
     print("=" * 60)
-    print("🔧 Configuration (Speed Optimized)")
+    print("🔧 Configuration - Curriculum Learning Optimized (Fixed)")
     print("=" * 60)
     print(f"  Device: {DEVICE}")
+    print(f"  Seed: {SEED}")
+    print(f"  Agents: {NUM_AGENTS} (1 Leader + {NUM_FOLLOWERS} Followers)")
+    print(f"  Pinned: {NUM_PINNED}")
+    print(f"  Episodes: {NUM_EPISODES}, Max Steps: {MAX_STEPS}")
     print(f"  Parallel Envs: {NUM_PARALLEL_ENVS}")
     print(f"  Batch Size: {BATCH_SIZE}")
-    print(f"  Update Frequency: every {UPDATE_FREQUENCY} steps")
-    print(f"  Gradient Steps: {GRADIENT_STEPS}")
-    print(f"  Updates per Episode: {updates_per_ep}")
-    print(f"  Total Gradient Steps per Episode: {total_gradient_steps}")
-    print(f"  AMP Training: {USE_AMP}")
+    print(f"  📚 Curriculum Learning:")
+    print(f"     Comm Penalty: {COMM_PENALTY_INIT} → {COMM_PENALTY_FINAL}")
+    print(f"     Threshold Range: [{THRESHOLD_MIN_INIT}, {THRESHOLD_MAX_INIT}] → [{THRESHOLD_MIN_FINAL}, {THRESHOLD_MAX_FINAL}]")
+    print(f"     Comm Bonus: {COMM_BONUS_INIT} → {COMM_BONUS_FINAL}")
+    print(f"     Warmup: {COMM_PENALTY_WARMUP} eps, Anneal: {COMM_PENALTY_ANNEAL} eps")
+    print(f"  🔧 Action Scales: U={U_SCALE}, TH={TH_SCALE}")
     print("=" * 60)"""
 有向生成树通信拓扑
 """
@@ -353,7 +405,7 @@ class OptimizedReplayBuffer:
     
     def is_ready(self, batch_size):
         return self.size >= batch_size"""
-神经网络模型 - GAT 编码器、Actor、Critic
+神经网络模型 - GAT 编码器、Actor、Critic（修复版）
 """
 import torch
 import torch.nn as nn
@@ -371,7 +423,7 @@ except ImportError:
 
 from config import (
     STATE_DIM, HIDDEN_DIM, ACTION_DIM,
-    LOG_STD_MIN, LOG_STD_MAX
+    LOG_STD_MIN, LOG_STD_MAX, U_SCALE, TH_SCALE  # 🔧 添加导入
 )
 
 
@@ -417,7 +469,7 @@ class TopologyAwareGATEncoder(nn.Module):
 
 
 class GaussianActor(nn.Module):
-    """高斯策略 Actor 网络"""
+    """高斯策略 Actor 网络（修复版）"""
     
     def __init__(self, state_dim=STATE_DIM, hidden_dim=HIDDEN_DIM, num_heads=4):
         super(GaussianActor, self).__init__()
@@ -446,11 +498,16 @@ class GaussianActor(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
         )
         
-        self.u_scale = 5.0
-        self.th_scale = 0.8
+        # 🔧 使用配置中的缩放因子
+        self.u_scale = U_SCALE
+        self.th_scale = TH_SCALE
         
         # 数值稳定性常数
         self._eps = 1e-6
+        
+        # 🔧 预计算 log(scale) 以提高效率
+        self._log_u_scale = torch.log(torch.tensor(self.u_scale))
+        self._log_th_scale = torch.log(torch.tensor(self.th_scale))
     
     def forward(self, x, edge_index, role_ids, deterministic=False):
         feat = self.encoder(x, edge_index, role_ids)
@@ -484,16 +541,20 @@ class GaussianActor(nn.Module):
             th_sigmoid = torch.sigmoid(th_sample)
             th = th_sigmoid * self.th_scale
             
-            # 数值稳定的 log_prob 计算
-            # 对于 tanh 变换: log|det(df/dx)| = log(1 - tanh^2(x))
+            # 🔧 修复：正确计算 log_prob，考虑 scale 因子
+            # 变换: u = u_scale * tanh(u_sample)
+            # Jacobian: du/d(u_sample) = u_scale * (1 - tanh^2(u_sample))
+            # log|Jacobian| = log(u_scale) + log(1 - tanh^2(u_sample))
             log_prob_u = u_dist.log_prob(u_sample) - torch.log(
                 torch.clamp(1.0 - u_tanh.pow(2), min=self._eps, max=1.0)
-            )
+            ) - self._log_u_scale.to(u.device)
             
-            # 对于 sigmoid 变换: log|det(df/dx)| = log(sigmoid(x) * (1 - sigmoid(x)))
+            # 变换: th = th_scale * sigmoid(th_sample)
+            # Jacobian: dth/d(th_sample) = th_scale * sigmoid * (1 - sigmoid)
+            # log|Jacobian| = log(th_scale) + log(sigmoid) + log(1 - sigmoid)
             log_prob_th = th_dist.log_prob(th_sample) - torch.log(
                 torch.clamp(th_sigmoid * (1.0 - th_sigmoid), min=self._eps, max=0.25)
-            )
+            ) - self._log_th_scale.to(th.device)
             
             log_prob = (log_prob_u + log_prob_th).sum(dim=-1, keepdim=True)
         
@@ -528,21 +589,26 @@ class SoftQNetwork(nn.Module):
         q_value = self.q_net(q_input)
         
         return q_value"""
-领导者-跟随者多智能体系统环境 - 增强版
+领导者-跟随者多智能体系统环境 - 课程学习优化版（修复版）
 """
 import torch
 import math
 
 from config import (
-    DEVICE, STATE_DIM, DT, COMM_PENALTY,
+    DEVICE, STATE_DIM, DT,
+    COMM_PENALTY_INIT, 
+    THRESHOLD_MIN_INIT, THRESHOLD_MAX_INIT,
+    THRESHOLD_MIN_FINAL, THRESHOLD_MAX_FINAL,
+    COMM_BONUS_INIT,
     LEADER_AMPLITUDE, LEADER_OMEGA, LEADER_PHASE,
     POS_LIMIT, VEL_LIMIT,
-    REWARD_MIN, REWARD_MAX, USE_SOFT_REWARD_SCALING
+    REWARD_MIN, REWARD_MAX, USE_SOFT_REWARD_SCALING,
+    TH_SCALE  # 🔧 添加导入
 )
 
 
 class BatchedLeaderFollowerEnv:
-    """完全向量化的批量环境 - 增强版"""
+    """完全向量化的批量环境 - 课程学习优化版（修复版）"""
     
     def __init__(self, topology, num_envs=64):
         self.topology = topology
@@ -561,9 +627,21 @@ class BatchedLeaderFollowerEnv:
         self.reward_max = REWARD_MAX
         self.use_soft_scaling = USE_SOFT_REWARD_SCALING
         
-        # 🔧 增强控制器增益
-        self.base_pos_gain = 5.0   # 位置反馈增益 (增大)
-        self.base_vel_gain = 2.5   # 速度反馈增益 (增大)
+        # 控制器增益
+        self.base_pos_gain = 5.0
+        self.base_vel_gain = 2.5
+        
+        # 🔧 课程学习参数（由外部设置）
+        self.comm_penalty = COMM_PENALTY_INIT
+        self.threshold_min = THRESHOLD_MIN_INIT
+        self.threshold_max = THRESHOLD_MAX_INIT
+        self.comm_bonus = COMM_BONUS_INIT
+        
+        # 🔧 课程学习进度（0-1）
+        self.curriculum_progress = 0.0
+        
+        # 🔧 阈值缩放因子（与 networks.py 保持一致）
+        self.th_scale = TH_SCALE
         
         self.role_ids = torch.zeros(self.num_agents, dtype=torch.long, device=DEVICE)
         self.role_ids[1:] = 1
@@ -577,10 +655,29 @@ class BatchedLeaderFollowerEnv:
         self.last_broadcast_vel = torch.zeros(num_envs, self.num_agents, device=DEVICE)
         self.t = torch.zeros(num_envs, device=DEVICE)
         
-        # 误差记录
         self._prev_error = None
-        
         self.reset()
+    
+    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
+        """
+        设置课程学习参数
+        
+        Args:
+            comm_penalty: 通信惩罚系数
+            threshold_min: 阈值下界
+            threshold_max: 阈值上界
+            comm_bonus: 通信奖励系数
+            progress: 课程进度 [0, 1]
+        """
+        self.comm_penalty = comm_penalty
+        self.threshold_min = threshold_min
+        self.threshold_max = threshold_max
+        self.comm_bonus = comm_bonus
+        self.curriculum_progress = progress
+    
+    def set_comm_penalty(self, penalty):
+        """设置当前通信惩罚系数（兼容旧接口）"""
+        self.comm_penalty = penalty
     
     def _precompute_neighbor_info(self):
         """预计算邻居聚合矩阵"""
@@ -598,10 +695,9 @@ class BatchedLeaderFollowerEnv:
         in_degree_safe = in_degree.clamp(min=1.0)
         self.norm_adj_matrix = self.adj_matrix / in_degree_safe.unsqueeze(1)
         
-        # pinning 增益
         self.pinning_gains = torch.zeros(self.num_agents, device=DEVICE)
         for f in self.topology.pinned_followers:
-            self.pinning_gains[f] = 2.0  # 🔧 增强 pinning 增益
+            self.pinning_gains[f] = 2.0
     
     def _leader_state_batch(self, t):
         """批量计算领导者状态"""
@@ -623,9 +719,16 @@ class BatchedLeaderFollowerEnv:
         self.positions[env_ids, 0] = leader_pos
         self.velocities[env_ids, 0] = leader_vel
         
-        # 🔧 初始位置更接近领导者
-        self.positions[env_ids, 1:] = leader_pos.unsqueeze(1) + torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.3
-        self.velocities[env_ids, 1:] = leader_vel.unsqueeze(1) + torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.1
+        # 🔧 初始位置根据课程进度调整
+        init_pos_std = 0.2 + 0.3 * self.curriculum_progress
+        init_vel_std = 0.05 + 0.1 * self.curriculum_progress
+        
+        self.positions[env_ids, 1:] = leader_pos.unsqueeze(1) + torch.randn(
+            num_reset, self.num_followers, device=DEVICE
+        ) * init_pos_std
+        self.velocities[env_ids, 1:] = leader_vel.unsqueeze(1) + torch.randn(
+            num_reset, self.num_followers, device=DEVICE
+        ) * init_vel_std
         
         self.last_broadcast_pos[env_ids] = self.positions[env_ids].clone()
         self.last_broadcast_vel[env_ids] = self.velocities[env_ids].clone()
@@ -644,7 +747,6 @@ class BatchedLeaderFollowerEnv:
         pos_error = self.positions - neighbor_avg_pos
         vel_error = self.velocities - neighbor_avg_vel
         
-        # 🔧 归一化状态，帮助网络学习
         state[:, :, 0] = pos_error / (self.pos_limit + 1e-6)
         state[:, :, 1] = vel_error / (self.vel_limit + 1e-6)
         state[:, :, 2] = self.positions / (self.pos_limit + 1e-6)
@@ -699,24 +801,29 @@ class BatchedLeaderFollowerEnv:
         self.positions[:, 0] = leader_pos
         self.velocities[:, 0] = leader_vel
         
-        # 🔧 解析动作 - 增大控制调整范围
-        delta_u = action[:, :, 0] * 2.0  # 放大 delta_u 的影响
-        threshold = action[:, :, 1].clamp(min=0.01, max=0.8)
+        # 解析动作
+        delta_u = action[:, :, 0] * 2.0
+        raw_threshold = action[:, :, 1]
+        
+        # 🔧 修复：线性映射，不再使用 sigmoid
+        # raw_threshold 范围是 [0, TH_SCALE]，直接归一化到 [0, 1]
+        normalized_threshold = raw_threshold / self.th_scale
+        # 确保归一化值在 [0, 1] 范围内
+        normalized_threshold = normalized_threshold.clamp(0.0, 1.0)
+        # 映射到当前课程阶段的阈值范围
+        threshold = self.threshold_min + (self.threshold_max - self.threshold_min) * normalized_threshold
+        threshold = threshold.clamp(min=0.001, max=0.5)
         
         # 计算总控制
         base_u = self._compute_base_control()
         total_u = base_u + delta_u
-        
-        # 🔧 限制控制输入
         total_u = torch.clamp(total_u, -20.0, 20.0)
         
         # 跟随者动力学
         follower_pos = self.positions[:, 1:]
         follower_vel = self.velocities[:, 1:]
         
-        # 🔧 减弱非线性干扰
         nonlinear_term = 0.2 * torch.sin(follower_pos) - 0.1 * follower_vel
-        
         acc = total_u + nonlinear_term
         
         new_vel = torch.clamp(follower_vel + acc * DT, -self.vel_limit, self.vel_limit)
@@ -738,30 +845,47 @@ class BatchedLeaderFollowerEnv:
         self.last_broadcast_pos[:, 0] = self.positions[:, 0]
         self.last_broadcast_vel[:, 0] = self.velocities[:, 0]
         
-        # 🔧 改进奖励计算
+        # ==================== 计算奖励（优化版）====================
         pos_error = torch.abs(self.positions[:, 1:] - self.positions[:, 0:1])
         vel_error = torch.abs(self.velocities[:, 1:] - self.velocities[:, 0:1])
         
-        # 位置误差和速度误差
-        tracking_error = (pos_error.mean(dim=1) + 0.5 * vel_error.mean(dim=1))
+        tracking_error = pos_error.mean(dim=1) + 0.5 * vel_error.mean(dim=1)
         
-        # 🔧 更好的奖励塑形
-        # 使用指数衰减奖励，误差小时奖励高
-        tracking_reward = torch.exp(-tracking_error) * 2.0 - 1.0  # 范围 [-1, 1]
+        # 跟踪奖励（主要奖励）
+        tracking_reward = torch.exp(-tracking_error) * 2.5 - 1.0
         
-        # 稳定性奖励
-        stability_bonus = torch.zeros_like(tracking_error)
+        # 改进奖励
+        improvement_bonus = torch.zeros_like(tracking_error)
         if self._prev_error is not None:
             improvement = self._prev_error - tracking_error
-            stability_bonus = torch.clamp(improvement * 2.0, -0.5, 0.5)
+            improvement_bonus = torch.clamp(improvement * 3.0, -0.5, 0.5)
         self._prev_error = tracking_error.detach().clone()
         
-        # 通信惩罚
+        # 通信率
         comm_rate = is_triggered.float().mean(dim=1)
-        comm_penalty = comm_rate * COMM_PENALTY
         
-        # 🔧 总奖励
-        raw_reward = tracking_reward + stability_bonus - comm_penalty
+        # 通信惩罚
+        comm_penalty = comm_rate * self.comm_penalty
+        
+        # 通信奖励（早期阶段）
+        comm_reward = comm_rate * self.comm_bonus
+        
+        # 一致性奖励
+        max_error = pos_error.max(dim=1)[0]
+        consensus_bonus = torch.where(
+            max_error < 0.3,
+            torch.ones_like(max_error) * 0.2,
+            torch.zeros_like(max_error)
+        )
+        
+        # 总奖励
+        raw_reward = (
+            tracking_reward +
+            improvement_bonus +
+            comm_reward -
+            comm_penalty +
+            consensus_bonus
+        )
         rewards = self._scale_reward_batch(raw_reward)
         
         dones = torch.zeros(self.num_envs, dtype=torch.bool, device=DEVICE)
@@ -772,8 +896,15 @@ class BatchedLeaderFollowerEnv:
             'leader_pos': self.positions[:, 0],
             'leader_vel': self.velocities[:, 0],
             'avg_follower_pos': self.positions[:, 1:].mean(dim=1),
-            'base_control_norm': base_u.abs().mean(),
-            'delta_u_norm': delta_u.abs().mean(),
+            'threshold_mean': threshold.mean(),
+            'threshold_min': self.threshold_min,
+            'threshold_max': self.threshold_max,
+            'comm_penalty_coef': self.comm_penalty,
+            'comm_bonus_coef': self.comm_bonus,
+            'curriculum_progress': self.curriculum_progress,
+            'tracking_reward': tracking_reward.mean(),
+            'comm_reward': comm_reward.mean(),
+            'comm_penalty_value': comm_penalty.mean(),
         }
         
         return self._get_state(), rewards, dones, infos
@@ -801,6 +932,16 @@ class LeaderFollowerMASEnv:
     def t(self):
         return self.batched_env.t[0].item()
     
+    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
+        """设置课程学习参数"""
+        self.batched_env.set_curriculum_params(
+            comm_penalty, threshold_min, threshold_max, comm_bonus, progress
+        )
+    
+    def set_comm_penalty(self, penalty):
+        """兼容旧接口"""
+        self.batched_env.set_comm_penalty(penalty)
+    
     def reset(self):
         state = self.batched_env.reset()
         return state[0]
@@ -808,7 +949,8 @@ class LeaderFollowerMASEnv:
     def step(self, action):
         action_batched = action.unsqueeze(0)
         states, rewards, dones, infos = self.batched_env.step(action_batched)
-        info = {k: (v[0].item() if isinstance(v, torch.Tensor) and v.dim() > 0 else v) 
+        info = {k: (v[0].item() if isinstance(v, torch.Tensor) and v.dim() > 0 else 
+                    v.item() if isinstance(v, torch.Tensor) else v) 
                 for k, v in infos.items()}
         return states[0], rewards[0].item(), dones[0].item(), info"""
 SAC 智能体 - 优化版 (修复 PyG 兼容性)
@@ -1606,7 +1748,7 @@ class TrainingDashboard:
             'total_episodes': len(self.reward_history),
             'elapsed_time': self._get_elapsed()
         }"""
-训练脚本 - 修复版
+训练脚本 - 课程学习优化版
 """
 import torch
 import time
@@ -1616,16 +1758,24 @@ from config import (
     NUM_EPISODES, VIS_INTERVAL, SAVE_MODEL_PATH, 
     print_config, set_seed, SEED,
     NUM_PARALLEL_ENVS, UPDATE_FREQUENCY, GRADIENT_STEPS,
-    USE_AMP, DEVICE
+    USE_AMP, DEVICE,
+    get_comm_penalty, get_threshold_bounds, get_comm_bonus, get_curriculum_progress,
+    COMM_PENALTY_WARMUP, COMM_PENALTY_ANNEAL
 )
 from topology import DirectedSpanningTreeTopology
 from environment import BatchedLeaderFollowerEnv, LeaderFollowerMASEnv
 from agent import SACAgent
-from dashboard import TrainingDashboard
 from utils import collect_trajectory, plot_evaluation
 
+# 可选导入 dashboard
+try:
+    from dashboard import TrainingDashboard
+    HAS_DASHBOARD = True
+except ImportError:
+    HAS_DASHBOARD = False
+    print("⚠️ Dashboard not available, using console logging")
 
-# CUDA 优化
+
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -1633,7 +1783,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL, 
           show_dashboard=True, seed=SEED):
-    """速度优化训练 - 修复版"""
+    """课程学习优化训练"""
     set_seed(seed)
     print_config()
     
@@ -1645,7 +1795,7 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
     agent = SACAgent(topology, use_amp=USE_AMP)
     
     dashboard = None
-    if show_dashboard:
+    if show_dashboard and HAS_DASHBOARD:
         dashboard = TrainingDashboard(num_episodes, vis_interval)
         dashboard.display()
     
@@ -1655,8 +1805,38 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
     start_time = time.time()
     log_interval = 10
     
+    # 🔧 打印课程学习阶段信息
+    print("\n📚 Curriculum Learning Schedule:")
+    print(f"   Phase 1 (WARMUP):  Ep 1-{COMM_PENALTY_WARMUP}")
+    print(f"   Phase 2 (ANNEAL):  Ep {COMM_PENALTY_WARMUP+1}-{COMM_PENALTY_WARMUP+COMM_PENALTY_ANNEAL}")
+    print(f"   Phase 3 (FULL):    Ep {COMM_PENALTY_WARMUP+COMM_PENALTY_ANNEAL+1}-{num_episodes}")
+    print()
+    
     # 训练循环
     for episode in range(1, num_episodes + 1):
+        
+        # 🔧 课程学习：获取当前阶段的所有参数
+        current_comm_penalty = get_comm_penalty(episode)
+        threshold_min, threshold_max = get_threshold_bounds(episode)
+        current_comm_bonus = get_comm_bonus(episode)
+        current_progress = get_curriculum_progress(episode)
+        
+        # 🔧 设置环境的课程学习参数
+        batched_env.set_curriculum_params(
+            comm_penalty=current_comm_penalty,
+            threshold_min=threshold_min,
+            threshold_max=threshold_max,
+            comm_bonus=current_comm_bonus,
+            progress=current_progress
+        )
+        eval_env.set_curriculum_params(
+            comm_penalty=current_comm_penalty,
+            threshold_min=threshold_min,
+            threshold_max=threshold_max,
+            comm_bonus=current_comm_bonus,
+            progress=current_progress
+        )
+        
         states = batched_env.reset()
         
         episode_rewards = torch.zeros(NUM_PARALLEL_ENVS, device=DEVICE)
@@ -1666,8 +1846,8 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
         for step in range(MAX_STEPS):
             global_step += NUM_PARALLEL_ENVS
             
-            # 🔧 更新 Episode 进度条
-            if dashboard and step % 10 == 0:  # 每10步更新一次，避免太频繁
+            # 更新步进度
+            if dashboard and step % 10 == 0:
                 dashboard.update_step(step, MAX_STEPS)
             
             actions = agent.select_action(states, deterministic=False)
@@ -1675,7 +1855,6 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
             
             agent.store_transitions_batch(states, actions, rewards, next_states, dones)
             
-            # 减少更新频率
             if step % UPDATE_FREQUENCY == 0 and step > 0:
                 agent.update(BATCH_SIZE, GRADIENT_STEPS)
             
@@ -1688,7 +1867,7 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
         avg_tracking_err = (episode_tracking_err / MAX_STEPS).mean().item()
         avg_comm = (episode_comm / MAX_STEPS).mean().item()
         
-        # 减少可视化频率
+        # 可视化
         trajectory_data = None
         if episode % vis_interval == 0 or episode == 1:
             trajectory_data = collect_trajectory(agent, eval_env, MAX_STEPS)
@@ -1698,6 +1877,12 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
             agent.save(SAVE_MODEL_PATH)
             trajectory_data = collect_trajectory(agent, eval_env, MAX_STEPS)
         
+        # 🔧 添加课程学习信息到 losses
+        agent.last_losses['comm_penalty'] = current_comm_penalty
+        agent.last_losses['comm_bonus'] = current_comm_bonus
+        agent.last_losses['threshold_range'] = (threshold_min, threshold_max)
+        agent.last_losses['curriculum_progress'] = current_progress
+        
         if dashboard:
             dashboard.update_episode(
                 episode, avg_reward, avg_tracking_err, avg_comm,
@@ -1706,9 +1891,18 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
         elif episode % log_interval == 0:
             elapsed = time.time() - start_time
             speed = episode / elapsed
+            
+            # 🔧 显示课程学习阶段
+            if current_progress < 0.01:
+                phase = "🎓 WARMUP"
+            elif current_progress < 0.99:
+                phase = f"📈 ANNEAL ({current_progress*100:.0f}%)"
+            else:
+                phase = "🎯 FULL"
+            
             print(f"Ep {episode:4d} | R:{avg_reward:7.2f} | Err:{avg_tracking_err:.4f} | "
-                  f"Comm:{avg_comm*100:.1f}% | Speed:{speed:.2f} ep/s | "
-                  f"Steps:{global_step/1e6:.2f}M")
+                  f"Comm:{avg_comm*100:.1f}% | Th:[{threshold_min:.3f},{threshold_max:.3f}] | "
+                  f"{phase} | {speed:.2f} ep/s")
     
     if dashboard:
         dashboard.finish()

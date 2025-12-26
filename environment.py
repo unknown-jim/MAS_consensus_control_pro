@@ -1,19 +1,24 @@
 """
-领导者-跟随者多智能体系统环境 - 增强版
+领导者-跟随者多智能体系统环境 - 课程学习优化版（修复版）
 """
 import torch
 import math
 
 from config import (
-    DEVICE, STATE_DIM, DT, COMM_PENALTY,
+    DEVICE, STATE_DIM, DT,
+    COMM_PENALTY_INIT, 
+    THRESHOLD_MIN_INIT, THRESHOLD_MAX_INIT,
+    THRESHOLD_MIN_FINAL, THRESHOLD_MAX_FINAL,
+    COMM_BONUS_INIT,
     LEADER_AMPLITUDE, LEADER_OMEGA, LEADER_PHASE,
     POS_LIMIT, VEL_LIMIT,
-    REWARD_MIN, REWARD_MAX, USE_SOFT_REWARD_SCALING
+    REWARD_MIN, REWARD_MAX, USE_SOFT_REWARD_SCALING,
+    TH_SCALE  # 🔧 添加导入
 )
 
 
 class BatchedLeaderFollowerEnv:
-    """完全向量化的批量环境 - 增强版"""
+    """完全向量化的批量环境 - 课程学习优化版（修复版）"""
     
     def __init__(self, topology, num_envs=64):
         self.topology = topology
@@ -32,9 +37,21 @@ class BatchedLeaderFollowerEnv:
         self.reward_max = REWARD_MAX
         self.use_soft_scaling = USE_SOFT_REWARD_SCALING
         
-        # 🔧 增强控制器增益
-        self.base_pos_gain = 5.0   # 位置反馈增益 (增大)
-        self.base_vel_gain = 2.5   # 速度反馈增益 (增大)
+        # 控制器增益
+        self.base_pos_gain = 5.0
+        self.base_vel_gain = 2.5
+        
+        # 🔧 课程学习参数（由外部设置）
+        self.comm_penalty = COMM_PENALTY_INIT
+        self.threshold_min = THRESHOLD_MIN_INIT
+        self.threshold_max = THRESHOLD_MAX_INIT
+        self.comm_bonus = COMM_BONUS_INIT
+        
+        # 🔧 课程学习进度（0-1）
+        self.curriculum_progress = 0.0
+        
+        # 🔧 阈值缩放因子（与 networks.py 保持一致）
+        self.th_scale = TH_SCALE
         
         self.role_ids = torch.zeros(self.num_agents, dtype=torch.long, device=DEVICE)
         self.role_ids[1:] = 1
@@ -48,10 +65,29 @@ class BatchedLeaderFollowerEnv:
         self.last_broadcast_vel = torch.zeros(num_envs, self.num_agents, device=DEVICE)
         self.t = torch.zeros(num_envs, device=DEVICE)
         
-        # 误差记录
         self._prev_error = None
-        
         self.reset()
+    
+    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
+        """
+        设置课程学习参数
+        
+        Args:
+            comm_penalty: 通信惩罚系数
+            threshold_min: 阈值下界
+            threshold_max: 阈值上界
+            comm_bonus: 通信奖励系数
+            progress: 课程进度 [0, 1]
+        """
+        self.comm_penalty = comm_penalty
+        self.threshold_min = threshold_min
+        self.threshold_max = threshold_max
+        self.comm_bonus = comm_bonus
+        self.curriculum_progress = progress
+    
+    def set_comm_penalty(self, penalty):
+        """设置当前通信惩罚系数（兼容旧接口）"""
+        self.comm_penalty = penalty
     
     def _precompute_neighbor_info(self):
         """预计算邻居聚合矩阵"""
@@ -69,10 +105,9 @@ class BatchedLeaderFollowerEnv:
         in_degree_safe = in_degree.clamp(min=1.0)
         self.norm_adj_matrix = self.adj_matrix / in_degree_safe.unsqueeze(1)
         
-        # pinning 增益
         self.pinning_gains = torch.zeros(self.num_agents, device=DEVICE)
         for f in self.topology.pinned_followers:
-            self.pinning_gains[f] = 2.0  # 🔧 增强 pinning 增益
+            self.pinning_gains[f] = 2.0
     
     def _leader_state_batch(self, t):
         """批量计算领导者状态"""
@@ -94,9 +129,16 @@ class BatchedLeaderFollowerEnv:
         self.positions[env_ids, 0] = leader_pos
         self.velocities[env_ids, 0] = leader_vel
         
-        # 🔧 初始位置更接近领导者
-        self.positions[env_ids, 1:] = leader_pos.unsqueeze(1) + torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.3
-        self.velocities[env_ids, 1:] = leader_vel.unsqueeze(1) + torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.1
+        # 🔧 初始位置根据课程进度调整
+        init_pos_std = 0.2 + 0.3 * self.curriculum_progress
+        init_vel_std = 0.05 + 0.1 * self.curriculum_progress
+        
+        self.positions[env_ids, 1:] = leader_pos.unsqueeze(1) + torch.randn(
+            num_reset, self.num_followers, device=DEVICE
+        ) * init_pos_std
+        self.velocities[env_ids, 1:] = leader_vel.unsqueeze(1) + torch.randn(
+            num_reset, self.num_followers, device=DEVICE
+        ) * init_vel_std
         
         self.last_broadcast_pos[env_ids] = self.positions[env_ids].clone()
         self.last_broadcast_vel[env_ids] = self.velocities[env_ids].clone()
@@ -115,7 +157,6 @@ class BatchedLeaderFollowerEnv:
         pos_error = self.positions - neighbor_avg_pos
         vel_error = self.velocities - neighbor_avg_vel
         
-        # 🔧 归一化状态，帮助网络学习
         state[:, :, 0] = pos_error / (self.pos_limit + 1e-6)
         state[:, :, 1] = vel_error / (self.vel_limit + 1e-6)
         state[:, :, 2] = self.positions / (self.pos_limit + 1e-6)
@@ -170,24 +211,29 @@ class BatchedLeaderFollowerEnv:
         self.positions[:, 0] = leader_pos
         self.velocities[:, 0] = leader_vel
         
-        # 🔧 解析动作 - 增大控制调整范围
-        delta_u = action[:, :, 0] * 2.0  # 放大 delta_u 的影响
-        threshold = action[:, :, 1].clamp(min=0.01, max=0.8)
+        # 解析动作
+        delta_u = action[:, :, 0] * 2.0
+        raw_threshold = action[:, :, 1]
+        
+        # 🔧 修复：线性映射，不再使用 sigmoid
+        # raw_threshold 范围是 [0, TH_SCALE]，直接归一化到 [0, 1]
+        normalized_threshold = raw_threshold / self.th_scale
+        # 确保归一化值在 [0, 1] 范围内
+        normalized_threshold = normalized_threshold.clamp(0.0, 1.0)
+        # 映射到当前课程阶段的阈值范围
+        threshold = self.threshold_min + (self.threshold_max - self.threshold_min) * normalized_threshold
+        threshold = threshold.clamp(min=0.001, max=0.5)
         
         # 计算总控制
         base_u = self._compute_base_control()
         total_u = base_u + delta_u
-        
-        # 🔧 限制控制输入
         total_u = torch.clamp(total_u, -20.0, 20.0)
         
         # 跟随者动力学
         follower_pos = self.positions[:, 1:]
         follower_vel = self.velocities[:, 1:]
         
-        # 🔧 减弱非线性干扰
         nonlinear_term = 0.2 * torch.sin(follower_pos) - 0.1 * follower_vel
-        
         acc = total_u + nonlinear_term
         
         new_vel = torch.clamp(follower_vel + acc * DT, -self.vel_limit, self.vel_limit)
@@ -209,30 +255,47 @@ class BatchedLeaderFollowerEnv:
         self.last_broadcast_pos[:, 0] = self.positions[:, 0]
         self.last_broadcast_vel[:, 0] = self.velocities[:, 0]
         
-        # 🔧 改进奖励计算
+        # ==================== 计算奖励（优化版）====================
         pos_error = torch.abs(self.positions[:, 1:] - self.positions[:, 0:1])
         vel_error = torch.abs(self.velocities[:, 1:] - self.velocities[:, 0:1])
         
-        # 位置误差和速度误差
-        tracking_error = (pos_error.mean(dim=1) + 0.5 * vel_error.mean(dim=1))
+        tracking_error = pos_error.mean(dim=1) + 0.5 * vel_error.mean(dim=1)
         
-        # 🔧 更好的奖励塑形
-        # 使用指数衰减奖励，误差小时奖励高
-        tracking_reward = torch.exp(-tracking_error) * 2.0 - 1.0  # 范围 [-1, 1]
+        # 跟踪奖励（主要奖励）
+        tracking_reward = torch.exp(-tracking_error) * 2.5 - 1.0
         
-        # 稳定性奖励
-        stability_bonus = torch.zeros_like(tracking_error)
+        # 改进奖励
+        improvement_bonus = torch.zeros_like(tracking_error)
         if self._prev_error is not None:
             improvement = self._prev_error - tracking_error
-            stability_bonus = torch.clamp(improvement * 2.0, -0.5, 0.5)
+            improvement_bonus = torch.clamp(improvement * 3.0, -0.5, 0.5)
         self._prev_error = tracking_error.detach().clone()
         
-        # 通信惩罚
+        # 通信率
         comm_rate = is_triggered.float().mean(dim=1)
-        comm_penalty = comm_rate * COMM_PENALTY
         
-        # 🔧 总奖励
-        raw_reward = tracking_reward + stability_bonus - comm_penalty
+        # 通信惩罚
+        comm_penalty = comm_rate * self.comm_penalty
+        
+        # 通信奖励（早期阶段）
+        comm_reward = comm_rate * self.comm_bonus
+        
+        # 一致性奖励
+        max_error = pos_error.max(dim=1)[0]
+        consensus_bonus = torch.where(
+            max_error < 0.3,
+            torch.ones_like(max_error) * 0.2,
+            torch.zeros_like(max_error)
+        )
+        
+        # 总奖励
+        raw_reward = (
+            tracking_reward +
+            improvement_bonus +
+            comm_reward -
+            comm_penalty +
+            consensus_bonus
+        )
         rewards = self._scale_reward_batch(raw_reward)
         
         dones = torch.zeros(self.num_envs, dtype=torch.bool, device=DEVICE)
@@ -243,8 +306,15 @@ class BatchedLeaderFollowerEnv:
             'leader_pos': self.positions[:, 0],
             'leader_vel': self.velocities[:, 0],
             'avg_follower_pos': self.positions[:, 1:].mean(dim=1),
-            'base_control_norm': base_u.abs().mean(),
-            'delta_u_norm': delta_u.abs().mean(),
+            'threshold_mean': threshold.mean(),
+            'threshold_min': self.threshold_min,
+            'threshold_max': self.threshold_max,
+            'comm_penalty_coef': self.comm_penalty,
+            'comm_bonus_coef': self.comm_bonus,
+            'curriculum_progress': self.curriculum_progress,
+            'tracking_reward': tracking_reward.mean(),
+            'comm_reward': comm_reward.mean(),
+            'comm_penalty_value': comm_penalty.mean(),
         }
         
         return self._get_state(), rewards, dones, infos
@@ -272,6 +342,16 @@ class LeaderFollowerMASEnv:
     def t(self):
         return self.batched_env.t[0].item()
     
+    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
+        """设置课程学习参数"""
+        self.batched_env.set_curriculum_params(
+            comm_penalty, threshold_min, threshold_max, comm_bonus, progress
+        )
+    
+    def set_comm_penalty(self, penalty):
+        """兼容旧接口"""
+        self.batched_env.set_comm_penalty(penalty)
+    
     def reset(self):
         state = self.batched_env.reset()
         return state[0]
@@ -279,6 +359,7 @@ class LeaderFollowerMASEnv:
     def step(self, action):
         action_batched = action.unsqueeze(0)
         states, rewards, dones, infos = self.batched_env.step(action_batched)
-        info = {k: (v[0].item() if isinstance(v, torch.Tensor) and v.dim() > 0 else v) 
+        info = {k: (v[0].item() if isinstance(v, torch.Tensor) and v.dim() > 0 else 
+                    v.item() if isinstance(v, torch.Tensor) else v) 
                 for k, v in infos.items()}
         return states[0], rewards[0].item(), dones[0].item(), info

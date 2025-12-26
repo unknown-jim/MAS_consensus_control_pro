@@ -1,5 +1,5 @@
 """
-神经网络模型 - GAT 编码器、Actor、Critic
+神经网络模型 - GAT 编码器、Actor、Critic（修复版）
 """
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ except ImportError:
 
 from config import (
     STATE_DIM, HIDDEN_DIM, ACTION_DIM,
-    LOG_STD_MIN, LOG_STD_MAX
+    LOG_STD_MIN, LOG_STD_MAX, U_SCALE, TH_SCALE  # 🔧 添加导入
 )
 
 
@@ -63,7 +63,7 @@ class TopologyAwareGATEncoder(nn.Module):
 
 
 class GaussianActor(nn.Module):
-    """高斯策略 Actor 网络"""
+    """高斯策略 Actor 网络（修复版）"""
     
     def __init__(self, state_dim=STATE_DIM, hidden_dim=HIDDEN_DIM, num_heads=4):
         super(GaussianActor, self).__init__()
@@ -92,11 +92,16 @@ class GaussianActor(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
         )
         
-        self.u_scale = 5.0
-        self.th_scale = 0.8
+        # 🔧 使用配置中的缩放因子
+        self.u_scale = U_SCALE
+        self.th_scale = TH_SCALE
         
         # 数值稳定性常数
         self._eps = 1e-6
+        
+        # 🔧 预计算 log(scale) 以提高效率
+        self._log_u_scale = torch.log(torch.tensor(self.u_scale))
+        self._log_th_scale = torch.log(torch.tensor(self.th_scale))
     
     def forward(self, x, edge_index, role_ids, deterministic=False):
         feat = self.encoder(x, edge_index, role_ids)
@@ -130,16 +135,20 @@ class GaussianActor(nn.Module):
             th_sigmoid = torch.sigmoid(th_sample)
             th = th_sigmoid * self.th_scale
             
-            # 数值稳定的 log_prob 计算
-            # 对于 tanh 变换: log|det(df/dx)| = log(1 - tanh^2(x))
+            # 🔧 修复：正确计算 log_prob，考虑 scale 因子
+            # 变换: u = u_scale * tanh(u_sample)
+            # Jacobian: du/d(u_sample) = u_scale * (1 - tanh^2(u_sample))
+            # log|Jacobian| = log(u_scale) + log(1 - tanh^2(u_sample))
             log_prob_u = u_dist.log_prob(u_sample) - torch.log(
                 torch.clamp(1.0 - u_tanh.pow(2), min=self._eps, max=1.0)
-            )
+            ) - self._log_u_scale.to(u.device)
             
-            # 对于 sigmoid 变换: log|det(df/dx)| = log(sigmoid(x) * (1 - sigmoid(x)))
+            # 变换: th = th_scale * sigmoid(th_sample)
+            # Jacobian: dth/d(th_sample) = th_scale * sigmoid * (1 - sigmoid)
+            # log|Jacobian| = log(th_scale) + log(sigmoid) + log(1 - sigmoid)
             log_prob_th = th_dist.log_prob(th_sample) - torch.log(
                 torch.clamp(th_sigmoid * (1.0 - th_sigmoid), min=self._eps, max=0.25)
-            )
+            ) - self._log_th_scale.to(th.device)
             
             log_prob = (log_prob_u + log_prob_th).sum(dim=-1, keepdim=True)
         
