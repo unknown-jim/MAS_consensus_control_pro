@@ -82,7 +82,7 @@ U_SCALE = 5.0
 TH_SCALE = 1.0
 
 # ==================== 训练参数（方案三：延长训练）====================
-NUM_EPISODES = 600        # ✅ 延长训练观察收敛（原450）
+NUM_EPISODES = 1000        # ✅ 延长训练观察收敛（原450）
 VIS_INTERVAL = 10
 NUM_PARALLEL_ENVS = 16    # ✅ 减少并行环境数
 UPDATE_FREQUENCY = 8      # ✅ 降低更新频率
