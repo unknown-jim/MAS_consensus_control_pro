@@ -1,61 +1,103 @@
 """
-领导者-跟随者多智能体系统环境 - 课程学习优化版（修复版）
+领导者-跟随者多智能体系统环境 - 自适应奖励设计
+
+奖励设计核心思想：
+1. 跟踪惩罚（饱和型）: -tanh(error * scale) * max_penalty
+   - 小误差时近似线性，大误差时饱和，避免梯度爆炸
+   
+2. 通信惩罚（自适应权重）: -comm_rate * base * exp(-error * decay)
+   - 误差大时：通信权重低，专注于减小误差
+   - 误差小时：通信权重高，开始优化通信效率
+
+3. 改进奖励：鼓励误差持续减小
 """
 import torch
-import math
+import numpy as np
 
 from config import (
     DEVICE, STATE_DIM, DT,
-    COMM_PENALTY_INIT, 
-    THRESHOLD_MIN_INIT, THRESHOLD_MAX_INIT,
-    THRESHOLD_MIN_FINAL, THRESHOLD_MAX_FINAL,
-    COMM_BONUS_INIT,
+    THRESHOLD_MIN, THRESHOLD_MAX,
     LEADER_AMPLITUDE, LEADER_OMEGA, LEADER_PHASE,
     POS_LIMIT, VEL_LIMIT,
     REWARD_MIN, REWARD_MAX, USE_SOFT_REWARD_SCALING,
-    TH_SCALE  # 🔧 添加导入
+    TH_SCALE,
+    # 奖励参数
+    TRACKING_ERROR_SCALE, TRACKING_PENALTY_MAX,
+    COMM_PENALTY_BASE, COMM_WEIGHT_DECAY,
+    IMPROVEMENT_SCALE, IMPROVEMENT_CLIP,
+    # 随机化配置
+    ENABLE_RANDOMIZATION,
+    LEADER_AMP_RANGE, LEADER_OMEGA_RANGE, LEADER_PHASE_RANGE,
+    LEADER_TRAJECTORY_TYPES,
+    FOLLOWER_POS_INIT_STD_RANGE, FOLLOWER_VEL_INIT_STD_RANGE
 )
 
 
 class BatchedLeaderFollowerEnv:
-    """完全向量化的批量环境 - 课程学习优化版（修复版）"""
+    """
+    完全向量化的批量环境 - 自适应奖励设计
     
-    def __init__(self, topology, num_envs=64):
+    特性：
+    1. 领导者动力学随机化
+    2. 跟随者初始状态随机化
+    3. 自适应奖励：误差大时专注跟踪，误差小时优化通信
+    """
+    
+    def __init__(self, topology, num_envs=64, enable_randomization=ENABLE_RANDOMIZATION):
         self.topology = topology
         self.num_envs = num_envs
         self.num_agents = topology.num_agents
         self.num_followers = topology.num_followers
         self.leader_id = topology.leader_id
+        self.enable_randomization = enable_randomization
         
-        self.leader_amplitude = LEADER_AMPLITUDE
-        self.leader_omega = LEADER_OMEGA
-        self.leader_phase = LEADER_PHASE
+        # 随机化范围
+        self.amp_range = LEADER_AMP_RANGE
+        self.omega_range = LEADER_OMEGA_RANGE
+        self.phase_range = LEADER_PHASE_RANGE
+        self.trajectory_types = LEADER_TRAJECTORY_TYPES
+        self.pos_std_range = FOLLOWER_POS_INIT_STD_RANGE
+        self.vel_std_range = FOLLOWER_VEL_INIT_STD_RANGE
         
+        # 领导者参数
+        self.leader_amplitude = torch.full((num_envs,), LEADER_AMPLITUDE, device=DEVICE)
+        self.leader_omega = torch.full((num_envs,), LEADER_OMEGA, device=DEVICE)
+        self.leader_phase = torch.full((num_envs,), LEADER_PHASE, device=DEVICE)
+        
+        # 轨迹类型
+        self.trajectory_type_ids = torch.zeros(num_envs, dtype=torch.long, device=DEVICE)
+        self.type_to_id = {'sine': 0, 'cosine': 1, 'mixed': 2, 'chirp': 3}
+        self.id_to_type = {v: k for k, v in self.type_to_id.items()}
+        
+        # 环境参数
         self.pos_limit = POS_LIMIT
         self.vel_limit = VEL_LIMIT
         self.reward_min = REWARD_MIN
         self.reward_max = REWARD_MAX
         self.use_soft_scaling = USE_SOFT_REWARD_SCALING
         
+        # 奖励参数
+        self.tracking_error_scale = TRACKING_ERROR_SCALE
+        self.tracking_penalty_max = TRACKING_PENALTY_MAX
+        self.comm_penalty_base = COMM_PENALTY_BASE
+        self.comm_weight_decay = COMM_WEIGHT_DECAY
+        self.improvement_scale = IMPROVEMENT_SCALE
+        self.improvement_clip = IMPROVEMENT_CLIP
+        
         # 控制器增益
         self.base_pos_gain = 5.0
         self.base_vel_gain = 2.5
         
-        # 🔧 课程学习参数（由外部设置）
-        self.comm_penalty = COMM_PENALTY_INIT
-        self.threshold_min = THRESHOLD_MIN_INIT
-        self.threshold_max = THRESHOLD_MAX_INIT
-        self.comm_bonus = COMM_BONUS_INIT
-        
-        # 🔧 课程学习进度（0-1）
-        self.curriculum_progress = 0.0
-        
-        # 🔧 阈值缩放因子（与 networks.py 保持一致）
+        # 通信参数
+        self.threshold_min = THRESHOLD_MIN
+        self.threshold_max = THRESHOLD_MAX
         self.th_scale = TH_SCALE
         
+        # 角色标识
         self.role_ids = torch.zeros(self.num_agents, dtype=torch.long, device=DEVICE)
         self.role_ids[1:] = 1
         
+        # 预计算邻居信息
         self._precompute_neighbor_info()
         
         # 预分配状态张量
@@ -68,27 +110,6 @@ class BatchedLeaderFollowerEnv:
         self._prev_error = None
         self.reset()
     
-    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
-        """
-        设置课程学习参数
-        
-        Args:
-            comm_penalty: 通信惩罚系数
-            threshold_min: 阈值下界
-            threshold_max: 阈值上界
-            comm_bonus: 通信奖励系数
-            progress: 课程进度 [0, 1]
-        """
-        self.comm_penalty = comm_penalty
-        self.threshold_min = threshold_min
-        self.threshold_max = threshold_max
-        self.comm_bonus = comm_bonus
-        self.curriculum_progress = progress
-    
-    def set_comm_penalty(self, penalty):
-        """设置当前通信惩罚系数（兼容旧接口）"""
-        self.comm_penalty = penalty
-    
     def _precompute_neighbor_info(self):
         """预计算邻居聚合矩阵"""
         self.adj_matrix = torch.zeros(self.num_agents, self.num_agents, device=DEVICE)
@@ -99,9 +120,6 @@ class BatchedLeaderFollowerEnv:
             self.adj_matrix[dst, src] = 1.0
         
         in_degree = self.adj_matrix.sum(dim=1)
-        self.degree_matrix = torch.diag(in_degree)
-        self.laplacian = self.degree_matrix - self.adj_matrix
-        
         in_degree_safe = in_degree.clamp(min=1.0)
         self.norm_adj_matrix = self.adj_matrix / in_degree_safe.unsqueeze(1)
         
@@ -109,36 +127,105 @@ class BatchedLeaderFollowerEnv:
         for f in self.topology.pinned_followers:
             self.pinning_gains[f] = 2.0
     
+    def _randomize_leader_dynamics(self, env_ids):
+        """随机化领导者动力学参数"""
+        if isinstance(env_ids, torch.Tensor):
+            num_envs = len(env_ids)
+        else:
+            num_envs = self.num_envs
+            env_ids = torch.arange(self.num_envs, device=DEVICE)
+        
+        self.leader_amplitude[env_ids] = torch.rand(num_envs, device=DEVICE) * \
+            (self.amp_range[1] - self.amp_range[0]) + self.amp_range[0]
+        
+        self.leader_omega[env_ids] = torch.rand(num_envs, device=DEVICE) * \
+            (self.omega_range[1] - self.omega_range[0]) + self.omega_range[0]
+        
+        self.leader_phase[env_ids] = torch.rand(num_envs, device=DEVICE) * \
+            (self.phase_range[1] - self.phase_range[0]) + self.phase_range[0]
+        
+        random_types = np.random.choice(
+            [self.type_to_id[t] for t in self.trajectory_types], 
+            size=num_envs
+        )
+        self.trajectory_type_ids[env_ids] = torch.tensor(random_types, device=DEVICE)
+    
     def _leader_state_batch(self, t):
         """批量计算领导者状态"""
-        pos = self.leader_amplitude * torch.sin(self.leader_omega * t + self.leader_phase)
-        vel = self.leader_amplitude * self.leader_omega * torch.cos(self.leader_omega * t + self.leader_phase)
+        A = self.leader_amplitude
+        omega = self.leader_omega
+        phi = self.leader_phase
+        
+        pos = torch.zeros(self.num_envs, device=DEVICE)
+        vel = torch.zeros(self.num_envs, device=DEVICE)
+        
+        # Sine
+        sine_mask = self.trajectory_type_ids == 0
+        if sine_mask.any():
+            pos[sine_mask] = A[sine_mask] * torch.sin(omega[sine_mask] * t[sine_mask] + phi[sine_mask])
+            vel[sine_mask] = A[sine_mask] * omega[sine_mask] * torch.cos(omega[sine_mask] * t[sine_mask] + phi[sine_mask])
+        
+        # Cosine
+        cosine_mask = self.trajectory_type_ids == 1
+        if cosine_mask.any():
+            pos[cosine_mask] = A[cosine_mask] * torch.cos(omega[cosine_mask] * t[cosine_mask] + phi[cosine_mask])
+            vel[cosine_mask] = -A[cosine_mask] * omega[cosine_mask] * torch.sin(omega[cosine_mask] * t[cosine_mask] + phi[cosine_mask])
+        
+        # Mixed
+        mixed_mask = self.trajectory_type_ids == 2
+        if mixed_mask.any():
+            t_m, A_m, omega_m, phi_m = t[mixed_mask], A[mixed_mask], omega[mixed_mask], phi[mixed_mask]
+            pos[mixed_mask] = A_m * (torch.sin(omega_m * t_m + phi_m) + 0.3 * torch.cos(0.5 * omega_m * t_m))
+            vel[mixed_mask] = A_m * (omega_m * torch.cos(omega_m * t_m + phi_m) - 0.15 * omega_m * torch.sin(0.5 * omega_m * t_m))
+        
+        # Chirp
+        chirp_mask = self.trajectory_type_ids == 3
+        if chirp_mask.any():
+            t_c, A_c, omega_c, phi_c = t[chirp_mask], A[chirp_mask], omega[chirp_mask], phi[chirp_mask]
+            chirp_rate = 0.1
+            inst_phase = (omega_c + chirp_rate * t_c) * t_c + phi_c
+            inst_freq = omega_c + 2 * chirp_rate * t_c
+            pos[chirp_mask] = A_c * torch.sin(inst_phase)
+            vel[chirp_mask] = A_c * inst_freq * torch.cos(inst_phase)
+        
         return pos, vel
     
     def reset(self, env_ids=None):
         """重置环境"""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=DEVICE)
-        
-        num_reset = len(env_ids) if isinstance(env_ids, torch.Tensor) else self.num_envs
+            num_reset = self.num_envs
+        else:
+            num_reset = len(env_ids)
         
         self.t[env_ids] = 0.0
         
-        leader_pos, leader_vel = self._leader_state_batch(self.t[env_ids])
+        if self.enable_randomization:
+            self._randomize_leader_dynamics(env_ids)
         
-        self.positions[env_ids, 0] = leader_pos
-        self.velocities[env_ids, 0] = leader_vel
+        leader_pos, leader_vel = self._leader_state_batch(self.t)
         
-        # 🔧 初始位置根据课程进度调整
-        init_pos_std = 0.2 + 0.3 * self.curriculum_progress
-        init_vel_std = 0.05 + 0.1 * self.curriculum_progress
+        self.positions[env_ids, 0] = leader_pos[env_ids]
+        self.velocities[env_ids, 0] = leader_vel[env_ids]
         
-        self.positions[env_ids, 1:] = leader_pos.unsqueeze(1) + torch.randn(
-            num_reset, self.num_followers, device=DEVICE
-        ) * init_pos_std
-        self.velocities[env_ids, 1:] = leader_vel.unsqueeze(1) + torch.randn(
-            num_reset, self.num_followers, device=DEVICE
-        ) * init_vel_std
+        if self.enable_randomization:
+            pos_std = torch.rand(num_reset, 1, device=DEVICE) * \
+                (self.pos_std_range[1] - self.pos_std_range[0]) + self.pos_std_range[0]
+            vel_std = torch.rand(num_reset, 1, device=DEVICE) * \
+                (self.vel_std_range[1] - self.vel_std_range[0]) + self.vel_std_range[0]
+            
+            self.positions[env_ids, 1:] = leader_pos[env_ids].unsqueeze(1) + \
+                torch.randn(num_reset, self.num_followers, device=DEVICE) * pos_std
+            self.velocities[env_ids, 1:] = leader_vel[env_ids].unsqueeze(1) + \
+                torch.randn(num_reset, self.num_followers, device=DEVICE) * vel_std
+        else:
+            self.positions[env_ids, 1:] = leader_pos[env_ids].unsqueeze(1) + \
+                torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.3
+            self.velocities[env_ids, 1:] = leader_vel[env_ids].unsqueeze(1) + \
+                torch.randn(num_reset, self.num_followers, device=DEVICE) * 0.1
+        
+        self.positions[env_ids] = torch.clamp(self.positions[env_ids], -self.pos_limit, self.pos_limit)
+        self.velocities[env_ids] = torch.clamp(self.velocities[env_ids], -self.vel_limit, self.vel_limit)
         
         self.last_broadcast_pos[env_ids] = self.positions[env_ids].clone()
         self.last_broadcast_vel[env_ids] = self.velocities[env_ids].clone()
@@ -202,6 +289,53 @@ class BatchedLeaderFollowerEnv:
         else:
             return torch.clamp(reward, self.reward_min, self.reward_max)
     
+    def _compute_reward(self, tracking_error, comm_rate):
+        """
+        计算自适应奖励
+        
+        奖励 = 跟踪惩罚 + 改进奖励 + 通信惩罚
+        
+        核心设计：
+        1. 跟踪惩罚（饱和型）: -tanh(error * scale) * max_penalty
+           - 小误差时梯度大，大误差时饱和
+           
+        2. 通信惩罚（自适应权重）: -comm_rate * base * exp(-error * decay)
+           - 误差大时权重低（专注跟踪）
+           - 误差小时权重高（优化通信）
+           
+        3. 改进奖励: 鼓励误差持续减小
+        """
+        # ==================== 1. 跟踪惩罚（饱和型）====================
+        # tracking_penalty ∈ [-max_penalty, 0]
+        # 误差=0 时惩罚=0，误差→∞ 时惩罚→-max_penalty
+        tracking_penalty = -torch.tanh(tracking_error * self.tracking_error_scale) * self.tracking_penalty_max
+        
+        # ==================== 2. 改进奖励 ====================
+        improvement_bonus = torch.zeros_like(tracking_error)
+        if self._prev_error is not None:
+            # 误差减小 → 正奖励，误差增大 → 负奖励
+            improvement = self._prev_error - tracking_error
+            improvement_bonus = torch.clamp(
+                improvement * self.improvement_scale, 
+                -self.improvement_clip, 
+                self.improvement_clip
+            )
+        self._prev_error = tracking_error.detach().clone()
+        
+        # ==================== 3. 通信惩罚（自适应权重）====================
+        # comm_weight ∈ (0, 1]
+        # 误差大时 → weight≈0（忽略通信成本）
+        # 误差小时 → weight≈1（重视通信成本）
+        comm_weight = torch.exp(-tracking_error * self.comm_weight_decay)
+        
+        # 有效通信惩罚
+        comm_penalty = -comm_rate * self.comm_penalty_base * comm_weight
+        
+        # ==================== 总奖励 ====================
+        raw_reward = tracking_penalty + improvement_bonus + comm_penalty
+        
+        return raw_reward, tracking_penalty, comm_penalty, comm_weight
+    
     def step(self, action):
         """批量执行一步"""
         self.t += DT
@@ -215,19 +349,13 @@ class BatchedLeaderFollowerEnv:
         delta_u = action[:, :, 0] * 2.0
         raw_threshold = action[:, :, 1]
         
-        # 🔧 修复：线性映射，不再使用 sigmoid
-        # raw_threshold 范围是 [0, TH_SCALE]，直接归一化到 [0, 1]
-        normalized_threshold = raw_threshold / self.th_scale
-        # 确保归一化值在 [0, 1] 范围内
-        normalized_threshold = normalized_threshold.clamp(0.0, 1.0)
-        # 映射到当前课程阶段的阈值范围
+        # 阈值映射
+        normalized_threshold = (raw_threshold / self.th_scale).clamp(0.0, 1.0)
         threshold = self.threshold_min + (self.threshold_max - self.threshold_min) * normalized_threshold
-        threshold = threshold.clamp(min=0.001, max=0.5)
         
         # 计算总控制
         base_u = self._compute_base_control()
-        total_u = base_u + delta_u
-        total_u = torch.clamp(total_u, -20.0, 20.0)
+        total_u = torch.clamp(base_u + delta_u, -20.0, 20.0)
         
         # 跟随者动力学
         follower_pos = self.positions[:, 1:]
@@ -255,46 +383,17 @@ class BatchedLeaderFollowerEnv:
         self.last_broadcast_pos[:, 0] = self.positions[:, 0]
         self.last_broadcast_vel[:, 0] = self.velocities[:, 0]
         
-        # ==================== 计算奖励（优化版）====================
+        # ==================== 计算跟踪误差 ====================
         pos_error = torch.abs(self.positions[:, 1:] - self.positions[:, 0:1])
         vel_error = torch.abs(self.velocities[:, 1:] - self.velocities[:, 0:1])
-        
         tracking_error = pos_error.mean(dim=1) + 0.5 * vel_error.mean(dim=1)
-        
-        # 跟踪奖励（主要奖励）
-        tracking_reward = torch.exp(-tracking_error) * 2.5 - 1.0
-        
-        # 改进奖励
-        improvement_bonus = torch.zeros_like(tracking_error)
-        if self._prev_error is not None:
-            improvement = self._prev_error - tracking_error
-            improvement_bonus = torch.clamp(improvement * 3.0, -0.5, 0.5)
-        self._prev_error = tracking_error.detach().clone()
         
         # 通信率
         comm_rate = is_triggered.float().mean(dim=1)
         
-        # 通信惩罚
-        comm_penalty = comm_rate * self.comm_penalty
-        
-        # 通信奖励（早期阶段）
-        comm_reward = comm_rate * self.comm_bonus
-        
-        # 一致性奖励
-        max_error = pos_error.max(dim=1)[0]
-        consensus_bonus = torch.where(
-            max_error < 0.3,
-            torch.ones_like(max_error) * 0.2,
-            torch.zeros_like(max_error)
-        )
-        
-        # 总奖励
-        raw_reward = (
-            tracking_reward +
-            improvement_bonus +
-            comm_reward -
-            comm_penalty +
-            consensus_bonus
+        # ==================== 计算奖励 ====================
+        raw_reward, tracking_penalty, comm_penalty, comm_weight = self._compute_reward(
+            tracking_error, comm_rate
         )
         rewards = self._scale_reward_batch(raw_reward)
         
@@ -305,30 +404,40 @@ class BatchedLeaderFollowerEnv:
             'comm_rate': comm_rate,
             'leader_pos': self.positions[:, 0],
             'leader_vel': self.velocities[:, 0],
-            'avg_follower_pos': self.positions[:, 1:].mean(dim=1),
             'threshold_mean': threshold.mean(),
-            'threshold_min': self.threshold_min,
-            'threshold_max': self.threshold_max,
-            'comm_penalty_coef': self.comm_penalty,
-            'comm_bonus_coef': self.comm_bonus,
-            'curriculum_progress': self.curriculum_progress,
-            'tracking_reward': tracking_reward.mean(),
-            'comm_reward': comm_reward.mean(),
-            'comm_penalty_value': comm_penalty.mean(),
+            # 奖励分解信息
+            'tracking_penalty': tracking_penalty.mean(),
+            'comm_penalty': comm_penalty.mean(),
+            'comm_weight': comm_weight.mean(),
+            # 领导者参数
+            'leader_amplitude_mean': self.leader_amplitude.mean(),
+            'leader_omega_mean': self.leader_omega.mean(),
         }
         
         return self._get_state(), rewards, dones, infos
+    
+    def get_leader_info(self):
+        """获取领导者参数信息"""
+        return {
+            'amplitude': self.leader_amplitude.cpu().numpy(),
+            'omega': self.leader_omega.cpu().numpy(),
+            'phase': self.leader_phase.cpu().numpy(),
+            'trajectory_types': [self.id_to_type[i.item()] for i in self.trajectory_type_ids]
+        }
 
 
 class LeaderFollowerMASEnv:
     """单环境版本"""
     
-    def __init__(self, topology):
-        self.batched_env = BatchedLeaderFollowerEnv(topology, num_envs=1)
+    def __init__(self, topology, enable_randomization=ENABLE_RANDOMIZATION):
+        self.batched_env = BatchedLeaderFollowerEnv(
+            topology, num_envs=1, enable_randomization=enable_randomization
+        )
         self.topology = topology
         self.num_agents = topology.num_agents
         self.num_followers = topology.num_followers
         self.role_ids = self.batched_env.role_ids
+        self.enable_randomization = enable_randomization
     
     @property
     def positions(self):
@@ -342,24 +451,33 @@ class LeaderFollowerMASEnv:
     def t(self):
         return self.batched_env.t[0].item()
     
-    def set_curriculum_params(self, comm_penalty, threshold_min, threshold_max, comm_bonus, progress):
-        """设置课程学习参数"""
-        self.batched_env.set_curriculum_params(
-            comm_penalty, threshold_min, threshold_max, comm_bonus, progress
-        )
+    @property
+    def leader_amplitude(self):
+        return self.batched_env.leader_amplitude[0].item()
     
-    def set_comm_penalty(self, penalty):
-        """兼容旧接口"""
-        self.batched_env.set_comm_penalty(penalty)
+    @property
+    def leader_omega(self):
+        return self.batched_env.leader_omega[0].item()
+    
+    @property
+    def trajectory_type(self):
+        type_id = self.batched_env.trajectory_type_ids[0].item()
+        return self.batched_env.id_to_type[type_id]
     
     def reset(self):
-        state = self.batched_env.reset()
-        return state[0]
+        return self.batched_env.reset()[0]
     
     def step(self, action):
-        action_batched = action.unsqueeze(0)
-        states, rewards, dones, infos = self.batched_env.step(action_batched)
+        states, rewards, dones, infos = self.batched_env.step(action.unsqueeze(0))
         info = {k: (v[0].item() if isinstance(v, torch.Tensor) and v.dim() > 0 else 
                     v.item() if isinstance(v, torch.Tensor) else v) 
                 for k, v in infos.items()}
         return states[0], rewards[0].item(), dones[0].item(), info
+    
+    def get_leader_info(self):
+        return {
+            'amplitude': self.leader_amplitude,
+            'omega': self.leader_omega,
+            'phase': self.batched_env.leader_phase[0].item(),
+            'trajectory_type': self.trajectory_type
+        }

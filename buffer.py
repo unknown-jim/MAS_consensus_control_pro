@@ -1,5 +1,5 @@
 """
-经验回放缓冲区 - GPU 优化版
+经验回放缓冲区
 """
 import torch
 from config import DEVICE, BUFFER_SIZE, STATE_DIM, ACTION_DIM, NUM_AGENTS

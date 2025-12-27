@@ -18,7 +18,7 @@ def collect_trajectory(agent, env, max_steps=MAX_STEPS):
     """收集轨迹用于可视化"""
     state = env.reset()
     
-    times = [0]
+    times = [0.0]
     leader_pos = [env.positions[0].item()]
     leader_vel = [env.velocities[0].item()]
     follower_pos = [env.positions[1:].cpu().numpy()]
@@ -103,23 +103,25 @@ def plot_evaluation(agent, topology, num_tests=3, save_path=None):
         
         results.append({'final_error': final_error, 'avg_error': avg_error})
         
+        # 位置图
         ax1 = axes[test_idx, 0]
         ax1.plot(traj['times'], traj['leader_pos'], 'r-', linewidth=2.5, label='Leader')
         colors = plt.cm.Blues(np.linspace(0.3, 0.9, traj['follower_pos'].shape[1]))
-        for i in range(min(5, traj['follower_pos'].shape[1])):
+        for i in range(traj['follower_pos'].shape[1]):
             ax1.plot(traj['times'], traj['follower_pos'][:, i], color=colors[i], 
-                    alpha=0.8, linewidth=1.2, label=f'F{i+1}')
+                    alpha=0.7, linewidth=1.2, label=f'F{i+1}' if i < 3 else None)
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Position')
         ax1.set_title(f'Test {test_idx+1}: Position (Final Err: {final_error:.4f})')
         ax1.legend(loc='upper right', fontsize=8)
         ax1.grid(True, alpha=0.3)
         
+        # 速度图
         ax2 = axes[test_idx, 1]
         ax2.plot(traj['times'], traj['leader_vel'], 'r-', linewidth=2.5, label='Leader')
-        for i in range(min(5, traj['follower_vel'].shape[1])):
+        for i in range(traj['follower_vel'].shape[1]):
             ax2.plot(traj['times'], traj['follower_vel'][:, i], color=colors[i], 
-                    alpha=0.8, linewidth=1.2)
+                    alpha=0.7, linewidth=1.2)
         ax2.set_xlabel('Time (s)')
         ax2.set_ylabel('Velocity')
         ax2.set_title(f'Test {test_idx+1}: Velocity')

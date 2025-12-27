@@ -105,7 +105,7 @@ def test_trajectory_tracking():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("环境稳定性测试 (更新版)")
+    print("环境稳定性测试")
     print("=" * 60)
     
     stable = test_zero_control()
