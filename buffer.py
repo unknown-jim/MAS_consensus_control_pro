@@ -2,18 +2,16 @@
 经验回放缓冲区
 """
 import torch
+from typing import Tuple
+
 from config import DEVICE, BUFFER_SIZE, STATE_DIM, ACTION_DIM, NUM_AGENTS
 
 
 class OptimizedReplayBuffer:
-    """
-    GPU 预分配的高效经验回放缓冲区
+    """GPU 预分配的高效经验回放缓冲区"""
     
-    支持批量存储和采样
-    """
-    
-    def __init__(self, capacity=BUFFER_SIZE, num_agents=NUM_AGENTS, 
-                 state_dim=STATE_DIM, action_dim=ACTION_DIM):
+    def __init__(self, capacity: int = BUFFER_SIZE, num_agents: int = NUM_AGENTS, 
+                 state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
         self.capacity = capacity
         self.num_agents = num_agents
         self.num_followers = num_agents - 1
@@ -30,7 +28,8 @@ class OptimizedReplayBuffer:
         self.next_states = torch.zeros(capacity, num_agents, state_dim, device=DEVICE)
         self.dones = torch.zeros(capacity, device=DEVICE)
     
-    def push(self, state, action, reward, next_state, done):
+    def push(self, state: torch.Tensor, action: torch.Tensor, reward: float, 
+             next_state: torch.Tensor, done: bool) -> None:
         """存储单条经验"""
         self.states[self.ptr] = state
         self.actions[self.ptr] = action
@@ -41,22 +40,13 @@ class OptimizedReplayBuffer:
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
     
-    def push_batch(self, states, actions, rewards, next_states, dones):
-        """
-        批量存储经验
-        
-        Args:
-            states: (batch, num_agents, state_dim)
-            actions: (batch, num_followers, action_dim)
-            rewards: (batch,)
-            next_states: (batch, num_agents, state_dim)
-            dones: (batch,)
-        """
+    def push_batch(self, states: torch.Tensor, actions: torch.Tensor, 
+                   rewards: torch.Tensor, next_states: torch.Tensor, 
+                   dones: torch.Tensor) -> None:
+        """批量存储经验"""
         batch_size = states.shape[0]
         
-        # 计算存储位置
         if self.ptr + batch_size <= self.capacity:
-            # 不需要环绕
             idx = slice(self.ptr, self.ptr + batch_size)
             self.states[idx] = states
             self.actions[idx] = actions
@@ -64,7 +54,6 @@ class OptimizedReplayBuffer:
             self.next_states[idx] = next_states
             self.dones[idx] = dones.float()
         else:
-            # 需要环绕处理
             first_part = self.capacity - self.ptr
             second_part = batch_size - first_part
             
@@ -86,7 +75,7 @@ class OptimizedReplayBuffer:
         self.ptr = (self.ptr + batch_size) % self.capacity
         self.size = min(self.size + batch_size, self.capacity)
     
-    def sample(self, batch_size):
+    def sample(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
         """随机采样"""
         indices = torch.randint(0, self.size, (batch_size,), device=DEVICE)
         
@@ -98,8 +87,8 @@ class OptimizedReplayBuffer:
             self.dones[indices]
         )
     
-    def __len__(self):
+    def __len__(self) -> int:
         return self.size
     
-    def is_ready(self, batch_size):
+    def is_ready(self, batch_size: int) -> bool:
         return self.size >= batch_size

@@ -1,16 +1,16 @@
 """
-训练脚本 - CTDE 架构版（修复策略崩溃）
+训练脚本 - CTDE 架构
 """
 import torch
 import time
+from typing import Optional, Tuple
 
 from config import (
     NUM_FOLLOWERS, NUM_PINNED, MAX_STEPS, BATCH_SIZE,
     NUM_EPISODES, VIS_INTERVAL, SAVE_MODEL_PATH, 
     print_config, set_seed, SEED,
     NUM_PARALLEL_ENVS, UPDATE_FREQUENCY, GRADIENT_STEPS,
-    USE_AMP, DEVICE, WARMUP_STEPS,
-    COMM_PENALTY_BASE, COMM_WEIGHT_DECAY, TRACKING_PENALTY_MAX
+    USE_AMP, DEVICE, WARMUP_STEPS
 )
 from topology import DirectedSpanningTreeTopology
 from environment import BatchedLeaderFollowerEnv, LeaderFollowerMASEnv
@@ -29,9 +29,9 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL, 
-          show_dashboard=True, seed=SEED):
-    """CTDE 训练主函数（修复版）"""
+def train(num_episodes: int = NUM_EPISODES, vis_interval: int = VIS_INTERVAL, 
+          show_dashboard: bool = True, seed: int = SEED) -> Tuple[SACAgent, DirectedSpanningTreeTopology, Optional['TrainingDashboard']]:
+    """CTDE 训练主函数"""
     set_seed(seed)
     print_config()
     
@@ -53,7 +53,7 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
     start_time = time.time()
     warmup_printed = False
     
-    print(f"\n🚀 CTDE Training Started (Fixed)")
+    print(f"\nCTDE Training Started")
     print(f"   Warmup Steps: {WARMUP_STEPS}")
     print(f"   Parallel envs: {NUM_PARALLEL_ENVS}")
     print(f"   Update Frequency: {UPDATE_FREQUENCY}\n")
@@ -68,12 +68,11 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
         for step in range(MAX_STEPS):
             global_step += NUM_PARALLEL_ENVS
             
-            # ✅ 预热阶段提示
             if not warmup_printed and agent.total_steps >= WARMUP_STEPS:
-                print(f"🔥 Warmup complete! Starting policy updates...")
+                print(f"Warmup complete! Starting policy updates...")
                 warmup_printed = True
             
-            if dashboard and step % 30 == 0:  # ✅ 降低更新频率
+            if dashboard and step % 30 == 0:
                 dashboard.update_step(step, MAX_STEPS)
             
             actions = agent.select_action(states, deterministic=False)
@@ -106,17 +105,17 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
                 episode, avg_reward, avg_tracking_err, avg_comm,
                 agent.last_losses, trajectory_data
             )
-        elif episode % 20 == 0:  # ✅ 降低日志频率
+        elif episode % 20 == 0:
             elapsed = time.time() - start_time
             if avg_reward >= best_reward - 5:
-                status = "🏆"
+                status = "Best"
             elif avg_reward > reward_ok_threshold:
-                status = "✅"
+                status = "Good"
             else:
-                status = "⚠️"
+                status = "Training"
             print(f"[{time.strftime('%H:%M:%S')}] {status} Ep {episode:4d} | "
                   f"R:{avg_reward:7.2f} | Err:{avg_tracking_err:.4f} | "
-                  f"Comm:{avg_comm*100:.1f}% | α:{agent.alpha:.3f} | "
+                  f"Comm:{avg_comm*100:.1f}% | alpha:{agent.alpha:.3f} | "
                   f"{episode/elapsed:.2f} ep/s")
     
     if dashboard:
@@ -124,7 +123,7 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
     
     elapsed = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"✅ CTDE Training Complete!")
+    print(f"CTDE Training Complete!")
     print(f"   Total Time: {elapsed/60:.1f} min")
     print(f"   Best Reward: {best_reward:.2f}")
     print(f"   Total Steps: {global_step:,}")
@@ -133,14 +132,16 @@ def train(num_episodes=NUM_EPISODES, vis_interval=VIS_INTERVAL,
     return agent, topology, dashboard
 
 
-def evaluate(agent, topology, num_tests=5):
+def evaluate(agent: SACAgent, topology: DirectedSpanningTreeTopology, 
+             num_tests: int = 5) -> dict:
+    """评估模型"""
     from utils import evaluate_agent
     
     env = LeaderFollowerMASEnv(topology)
     results = evaluate_agent(agent, env, num_tests)
     
-    print("\n📊 Evaluation Results:")
-    print(f"   Mean Reward: {results['mean_reward']:.2f} ± {results['std_reward']:.2f}")
+    print("\nEvaluation Results:")
+    print(f"   Mean Reward: {results['mean_reward']:.2f} +/- {results['std_reward']:.2f}")
     print(f"   Mean Tracking Error: {results['mean_tracking_error']:.4f}")
     print(f"   Mean Comm Rate: {results['mean_comm_rate']*100:.1f}%")
     

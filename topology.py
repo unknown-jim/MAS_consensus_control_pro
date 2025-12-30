@@ -3,32 +3,21 @@
 """
 import torch
 import numpy as np
-
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+from typing import List, Optional
 
 from config import DEVICE, NUM_PINNED, TOPOLOGY_SEED
 
 
 class DirectedSpanningTreeTopology:
-    r"""
+    """
     有向生成树通信拓扑
     
     拓扑结构示意 (领导者为根节点):
-    
-                    Leader (0)
-                   /    |    \
-                 F1    F2    F3     <- Pinned Followers
-                / \     |     \
-              F4  F5   F6    F7     <- Other Followers
-                       / \
-                     F8  F9
+    Leader (0) -> Pinned Followers (F1, F2, F3) -> Other Followers (F4, F5, ...)
     """
     
-    def __init__(self, num_followers, num_pinned=NUM_PINNED, seed=TOPOLOGY_SEED):
+    def __init__(self, num_followers: int, num_pinned: int = NUM_PINNED, 
+                 seed: int = TOPOLOGY_SEED):
         self.num_followers = num_followers
         self.num_agents = num_followers + 1
         self.num_pinned = min(num_pinned, num_followers)
@@ -37,7 +26,7 @@ class DirectedSpanningTreeTopology:
         np.random.seed(seed)
         self._build_topology()
         
-    def _build_topology(self):
+    def _build_topology(self) -> None:
         """构建有向生成树"""
         edges = []
         follower_ids = list(range(1, self.num_agents))
@@ -68,12 +57,11 @@ class DirectedSpanningTreeTopology:
                 if (neighbor, f) not in edges and (f, neighbor) not in edges:
                     edges.append((neighbor, f))
         
-        # 转换为 PyTorch 格式
         src, dst = zip(*edges)
         self.edge_index = torch.tensor([src, dst], dtype=torch.long).to(DEVICE)
         self._compute_degrees()
         
-    def _compute_degrees(self):
+    def _compute_degrees(self) -> None:
         """计算节点度数"""
         self.in_degree = torch.zeros(self.num_agents, device=DEVICE)
         self.out_degree = torch.zeros(self.num_agents, device=DEVICE)
@@ -83,25 +71,22 @@ class DirectedSpanningTreeTopology:
             self.out_degree[src] += 1
             self.in_degree[dst] += 1
     
-    def get_neighbors(self, node_id):
+    def get_neighbors(self, node_id: int) -> List[int]:
         """获取节点的入边邻居"""
         mask = self.edge_index[1] == node_id
         return self.edge_index[0, mask].tolist()
     
-    def has_leader_access(self, node_id):
+    def has_leader_access(self, node_id: int) -> bool:
         """检查节点是否直接连接领导者"""
         return node_id in self.pinned_followers
     
-    def visualize(self, save_path=None):
+    def visualize(self, save_path: Optional[str] = None) -> None:
         """可视化拓扑结构"""
-        if not HAS_MATPLOTLIB:
-            print("matplotlib not available")
-            return
-            
         try:
+            import matplotlib.pyplot as plt
             import networkx as nx
         except ImportError:
-            print("Please install networkx: pip install networkx")
+            print("Please install matplotlib and networkx")
             return
         
         G = nx.DiGraph()
@@ -141,6 +126,6 @@ class DirectedSpanningTreeTopology:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.show()
         
-        print(f"\n📊 Topology Statistics:")
+        print(f"\nTopology Statistics:")
         print(f"   Nodes: {self.num_agents}, Edges: {self.edge_index.shape[1]}")
         print(f"   Pinned Followers: {self.pinned_followers}")

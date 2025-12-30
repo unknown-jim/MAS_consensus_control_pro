@@ -3,18 +3,46 @@
 """
 import torch
 import numpy as np
+from typing import Dict, List, Optional, Tuple
 
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+from config import DEVICE, MAX_STEPS, STATE_DIM, MAX_NEIGHBORS, NUM_AGENTS, USE_NEIGHBOR_INFO
 
-from config import DEVICE, MAX_STEPS
+
+def get_neighbor_obs(states: torch.Tensor, neighbor_indices: Dict[int, List[int]], 
+                     num_agents: int = NUM_AGENTS, 
+                     max_neighbors: int = MAX_NEIGHBORS) -> Optional[torch.Tensor]:
+    """
+    获取邻居观测（公共方法，供 agent.py 和 evaluate.py 共用）
+    
+    Args:
+        states: 状态张量 (num_agents, state_dim)
+        neighbor_indices: 邻居索引字典
+        num_agents: 智能体数量
+        max_neighbors: 最大邻居数
+    
+    Returns:
+        neighbor_obs: (num_followers, max_neighbors, state_dim)
+    """
+    if not USE_NEIGHBOR_INFO:
+        return None
+    
+    neighbor_obs_list = []
+    for follower_id in range(1, num_agents):
+        neighbors = neighbor_indices.get(follower_id, [])
+        if len(neighbors) > 0:
+            neighbor_states = states[neighbors]
+            if len(neighbors) < max_neighbors:
+                padding = torch.zeros(max_neighbors - len(neighbors), STATE_DIM, device=DEVICE)
+                neighbor_states = torch.cat([neighbor_states, padding], dim=0)
+        else:
+            neighbor_states = torch.zeros(max_neighbors, STATE_DIM, device=DEVICE)
+        neighbor_obs_list.append(neighbor_states)
+    
+    return torch.stack(neighbor_obs_list, dim=0)
 
 
 @torch.no_grad()
-def collect_trajectory(agent, env, max_steps=MAX_STEPS):
+def collect_trajectory(agent, env, max_steps: int = MAX_STEPS) -> Dict[str, np.ndarray]:
     """收集轨迹用于可视化"""
     state = env.reset()
     
@@ -44,7 +72,7 @@ def collect_trajectory(agent, env, max_steps=MAX_STEPS):
 
 
 @torch.no_grad()
-def evaluate_agent(agent, env, num_episodes=5):
+def evaluate_agent(agent, env, num_episodes: int = 5) -> Dict[str, float]:
     """评估智能体性能"""
     results = {
         'rewards': [],
@@ -78,11 +106,14 @@ def evaluate_agent(agent, env, num_episodes=5):
     }
 
 
-def plot_evaluation(agent, topology, num_tests=3, save_path=None):
+def plot_evaluation(agent, topology, num_tests: int = 3, 
+                    save_path: Optional[str] = None) -> List[Dict[str, float]]:
     """绘制评估结果"""
-    if not HAS_MATPLOTLIB:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
         print("matplotlib not available")
-        return
+        return []
     
     from environment import LeaderFollowerMASEnv
     
@@ -131,11 +162,11 @@ def plot_evaluation(agent, topology, num_tests=3, save_path=None):
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"📁 Figure saved to {save_path}")
+        print(f"Figure saved to {save_path}")
     
     plt.show()
     
-    print("\n📊 Evaluation Results:")
+    print("\nEvaluation Results:")
     print("-" * 40)
     for i, r in enumerate(results):
         print(f"Test {i+1}: Final Err = {r['final_error']:.4f}, Avg Err = {r['avg_error']:.4f}")

@@ -1,8 +1,9 @@
 """
-训练可视化仪表盘 - 自适应奖励版本（动态阈值）
+训练可视化仪表盘
 """
 import time
 import numpy as np
+from typing import Dict, List, Optional
 
 try:
     import matplotlib.pyplot as plt
@@ -23,65 +24,48 @@ from config import MAX_STEPS
 
 
 class TrainingDashboard:
-    """
-    训练仪表盘 - 自适应奖励版本
+    """训练仪表盘"""
     
-    阈值根据 MAX_STEPS 动态计算：
-    - 奖励阈值基于单步奖励范围 × 步数
-    - 跟踪误差阈值固定（与步数无关）
-    """
-    
-    def __init__(self, total_episodes, vis_interval=10, max_steps=MAX_STEPS):
+    def __init__(self, total_episodes: int, vis_interval: int = 10, 
+                 max_steps: int = MAX_STEPS):
         self.total_episodes = total_episodes
         self.vis_interval = vis_interval
         self.max_steps = max_steps
-        self.start_time = None
+        self.start_time: Optional[float] = None
         
-        # ========== 动态计算阈值 ==========
-        # 单步奖励范围分析：
-        #   tracking_penalty: [-1.5, 0]
-        #   improvement_bonus: [-0.3, +0.3]
-        #   comm_penalty: ≈0
-        #   总单步奖励: 约 [-1.8, +0.3]
-        #
-        # Episode 奖励 = 单步奖励 × 步数
-        # 良好: 单步 ≈ -0.33 → Episode ≈ -0.33 × max_steps
-        # 较差: 单步 ≈ -1.0  → Episode ≈ -1.0 × max_steps
+        # 动态计算阈值
+        self.reward_good_threshold = -0.33 * max_steps
+        self.reward_poor_threshold = -1.0 * max_steps
         
-        self.reward_good_threshold = -0.33 * max_steps   # 绿色阈值
-        self.reward_poor_threshold = -1.0 * max_steps    # 红色阈值
+        self.error_good_threshold = 0.2
+        self.error_poor_threshold = 0.8
         
-        # 跟踪误差阈值（与步数无关）
-        self.error_good_threshold = 0.2   # 绿色
-        self.error_poor_threshold = 0.8   # 红色
-        
-        # 通信率阈值
-        self.comm_good_range = (0.2, 0.6)  # 绿色范围
-        self.comm_poor_threshold = 0.8     # 红色阈值
+        self.comm_good_range = (0.2, 0.6)
+        self.comm_poor_threshold = 0.8
         
         # 历史记录
-        self.reward_history = []
-        self.tracking_error_history = []
-        self.comm_history = []
+        self.reward_history: List[float] = []
+        self.tracking_error_history: List[float] = []
+        self.comm_history: List[float] = []
         self.best_reward = -float('inf')
-        self.best_trajectory = None
+        self.best_trajectory: Optional[Dict] = None
         
         self.use_widgets = HAS_WIDGETS and HAS_MATPLOTLIB
         
         if self.use_widgets:
             self._create_widgets()
         else:
-            print("⚠️ Widgets not available, using console output")
-            print(f"📊 Dynamic thresholds (MAX_STEPS={max_steps}):")
+            print("Widgets not available, using console output")
+            print(f"Dynamic thresholds (MAX_STEPS={max_steps}):")
             print(f"   Reward: Good > {self.reward_good_threshold:.0f}, Poor < {self.reward_poor_threshold:.0f}")
     
-    def _create_widgets(self):
+    def _create_widgets(self) -> None:
         """创建 UI 组件"""
         self.title_html = widgets.HTML(value=f"""
             <div style="background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
                         padding: 15px; border-radius: 10px; margin-bottom: 10px;">
                 <h2 style="color: white; margin: 0; text-align: center;">
-                    🎯 Leader-Follower MAS Control (Adaptive Reward)
+                    Leader-Follower MAS Control
                 </h2>
                 <p style="color: rgba(255,255,255,0.8); margin: 5px 0 0 0; text-align: center; font-size: 12px;">
                     MAX_STEPS={self.max_steps} | R_good>{self.reward_good_threshold:.0f} | R_poor<{self.reward_poor_threshold:.0f}
@@ -123,7 +107,7 @@ class TrainingDashboard:
             )
         )
     
-    def _format_time(self, seconds):
+    def _format_time(self, seconds: Optional[float]) -> str:
         if seconds is None or seconds < 0:
             return "N/A"
         if seconds < 60:
@@ -132,46 +116,43 @@ class TrainingDashboard:
             return f"{int(seconds//60)}m {int(seconds%60)}s"
         return f"{int(seconds//3600)}h {int((seconds%3600)//60)}m"
     
-    def _get_elapsed(self):
+    def _get_elapsed(self) -> float:
         if self.start_time is None:
             return 0
         return time.time() - self.start_time
     
-    def _estimate_remaining(self, episode):
+    def _estimate_remaining(self, episode: int) -> str:
         elapsed = self._get_elapsed()
         if episode == 0 or elapsed <= 0:
             return "..."
         return self._format_time((elapsed / episode) * (self.total_episodes - episode))
     
-    def _get_reward_color(self, reward):
-        """根据动态阈值获取奖励颜色"""
+    def _get_reward_color(self, reward: float) -> str:
         if reward > self.reward_good_threshold:
-            return "#48bb78"  # 绿色
+            return "#48bb78"
         elif reward < self.reward_poor_threshold:
-            return "#f56565"  # 红色
+            return "#f56565"
         else:
-            return "#ed8936"  # 橙色
+            return "#ed8936"
     
-    def _get_error_color(self, tracking_err):
-        """获取误差颜色"""
+    def _get_error_color(self, tracking_err: float) -> str:
         if tracking_err < self.error_good_threshold:
-            return "#48bb78"  # 绿色
+            return "#48bb78"
         elif tracking_err > self.error_poor_threshold:
-            return "#f56565"  # 红色
+            return "#f56565"
         else:
-            return "#ed8936"  # 橙色
+            return "#ed8936"
     
-    def _get_comm_color(self, comm):
-        """获取通信率颜色"""
+    def _get_comm_color(self, comm: float) -> str:
         if self.comm_good_range[0] <= comm <= self.comm_good_range[1]:
-            return "#48bb78"  # 绿色
+            return "#48bb78"
         elif comm > self.comm_poor_threshold:
-            return "#f56565"  # 红色
+            return "#f56565"
         else:
-            return "#ed8936"  # 橙色
+            return "#ed8936"
     
-    def _generate_stats_html(self, episode, reward, tracking_err, comm, best, losses, elapsed):
-        """生成统计信息 HTML"""
+    def _generate_stats_html(self, episode: int, reward: float, tracking_err: float, 
+                             comm: float, best: float, losses: Dict, elapsed: float) -> str:
         r_color = self._get_reward_color(reward)
         e_color = self._get_error_color(tracking_err)
         c_color = self._get_comm_color(comm)
@@ -179,24 +160,24 @@ class TrainingDashboard:
         return f"""
         <div style="display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0;">
             <div style="flex:1;min-width:90px;background:linear-gradient(135deg,#667eea,#764ba2);padding:10px;border-radius:8px;color:white;text-align:center;">
-                <div style="font-size:10px;opacity:0.9;">📍 Episode</div>
+                <div style="font-size:10px;opacity:0.9;">Episode</div>
                 <div style="font-size:16px;font-weight:bold;">{episode}/{self.total_episodes}</div>
             </div>
             <div style="flex:1;min-width:90px;background:{r_color};padding:10px;border-radius:8px;color:white;text-align:center;">
-                <div style="font-size:10px;opacity:0.9;">🏆 Reward</div>
+                <div style="font-size:10px;opacity:0.9;">Reward</div>
                 <div style="font-size:16px;font-weight:bold;">{reward:.1f}</div>
                 <div style="font-size:9px;opacity:0.8;">Best: {best:.1f}</div>
             </div>
             <div style="flex:1;min-width:90px;background:{e_color};padding:10px;border-radius:8px;color:white;text-align:center;">
-                <div style="font-size:10px;opacity:0.9;">🎯 Error</div>
+                <div style="font-size:10px;opacity:0.9;">Error</div>
                 <div style="font-size:16px;font-weight:bold;">{tracking_err:.4f}</div>
             </div>
             <div style="flex:1;min-width:90px;background:{c_color};padding:10px;border-radius:8px;color:white;text-align:center;">
-                <div style="font-size:10px;opacity:0.9;">📡 Comm</div>
+                <div style="font-size:10px;opacity:0.9;">Comm</div>
                 <div style="font-size:16px;font-weight:bold;">{comm*100:.1f}%</div>
             </div>
             <div style="flex:1;min-width:90px;background:#4a5568;padding:10px;border-radius:8px;color:white;text-align:center;">
-                <div style="font-size:10px;opacity:0.9;">⏱️ Time</div>
+                <div style="font-size:10px;opacity:0.9;">Time</div>
                 <div style="font-size:16px;font-weight:bold;">{self._format_time(elapsed)}</div>
                 <div style="font-size:9px;opacity:0.8;">ETA: {self._estimate_remaining(episode)}</div>
             </div>
@@ -204,11 +185,11 @@ class TrainingDashboard:
         <div style="background:#f0f4f8;padding:8px;border-radius:6px;font-size:11px;margin-top:5px;">
             <span style="color:#666;">Q Loss:</span> <b>{losses.get('q1', 0):.4f}</b> |
             <span style="color:#666;">Actor Loss:</span> <b>{losses.get('actor', 0):.4f}</b> |
-            <span style="color:#666;">α:</span> <b>{losses.get('alpha', 0.2):.3f}</b>
+            <span style="color:#666;">alpha:</span> <b>{losses.get('alpha', 0.2):.3f}</b>
         </div>
         """
     
-    def display(self):
+    def display(self) -> None:
         self.start_time = time.time()
         
         if self.use_widgets:
@@ -218,22 +199,23 @@ class TrainingDashboard:
                 self.step_progress,
                 self.progress_text,
                 self.stats_html,
-                widgets.HTML("<h4 style='margin: 15px 0 5px 0;'>📈 Training Progress</h4>"),
+                widgets.HTML("<h4 style='margin: 15px 0 5px 0;'>Training Progress</h4>"),
                 self.plot_output,
-                widgets.HTML("<h4 style='margin: 15px 0 5px 0;'>📝 Training Log</h4>"),
+                widgets.HTML("<h4 style='margin: 15px 0 5px 0;'>Training Log</h4>"),
                 self.log_output
             ])
             display(dashboard_layout)
         else:
             print("=" * 60)
-            print("🎯 Training Started (Console Mode)")
+            print("Training Started (Console Mode)")
             print("=" * 60)
     
-    def update_step(self, step, max_steps):
+    def update_step(self, step: int, max_steps: int) -> None:
         if self.use_widgets:
             self.step_progress.value = (step / max_steps) * 100
     
-    def update_episode(self, episode, reward, tracking_err, comm, losses, trajectory_data=None):
+    def update_episode(self, episode: int, reward: float, tracking_err: float, 
+                       comm: float, losses: Dict, trajectory_data: Optional[Dict] = None) -> None:
         elapsed = self._get_elapsed()
         
         self.reward_history.append(reward)
@@ -252,7 +234,7 @@ class TrainingDashboard:
             speed = episode / elapsed if elapsed > 0 else 0
             self.progress_text.value = f"""
             <p style='margin: 5px 0; font-size: 13px;'>
-                🚀 <b>Episode {episode}/{self.total_episodes}</b> | 
+                <b>Episode {episode}/{self.total_episodes}</b> | 
                 Speed: <b>{speed:.2f}</b> ep/s
             </p>
             """
@@ -264,13 +246,12 @@ class TrainingDashboard:
             
             with self.log_output:
                 ts = time.strftime("%H:%M:%S")
-                # 动态状态判断
                 if reward >= self.best_reward - 5:
-                    status = "🏆"
-                elif reward > self.reward_good_threshold * 1.5:  # 比绿色阈值略宽松
-                    status = "✅"
+                    status = "Best"
+                elif reward > self.reward_good_threshold * 1.5:
+                    status = "Good"
                 else:
-                    status = "⚠️"
+                    status = "Training"
                 print(f"[{ts}] {status} Ep {episode:4d} | R:{reward:7.1f} | "
                       f"Err:{tracking_err:.4f} | Comm:{comm*100:.1f}%")
             
@@ -280,7 +261,7 @@ class TrainingDashboard:
             if episode % 20 == 0:
                 print(f"Ep {episode:4d} | R:{reward:7.1f} | Err:{tracking_err:.4f} | Comm:{comm*100:.1f}%")
     
-    def _update_plots(self):
+    def _update_plots(self) -> None:
         if not HAS_MATPLOTLIB or not self.use_widgets:
             return
         
@@ -295,7 +276,7 @@ class TrainingDashboard:
             
             num_eps = len(self.reward_history)
             
-            # 位置跟踪
+            # Position tracking
             ax1 = axes[0, 0]
             if self.best_trajectory is not None:
                 t = self.best_trajectory['times']
@@ -316,7 +297,7 @@ class TrainingDashboard:
             ax1.legend(loc='upper right')
             ax1.grid(True, alpha=0.3)
             
-            # 速度跟踪
+            # Velocity tracking
             ax2 = axes[0, 1]
             if self.best_trajectory is not None:
                 t = self.best_trajectory['times']
@@ -337,7 +318,7 @@ class TrainingDashboard:
             ax2.legend(loc='upper right')
             ax2.grid(True, alpha=0.3)
             
-            # 奖励曲线
+            # Reward curve
             ax3 = axes[1, 0]
             if num_eps > 0:
                 eps = np.arange(1, num_eps + 1)
@@ -357,7 +338,6 @@ class TrainingDashboard:
                 
                 ax3.set_xlim(0, max(num_eps + 1, 10))
                 
-                # 动态参考线
                 ax3.axhline(y=self.reward_good_threshold, color='green', linestyle='--', 
                            alpha=0.5, label=f'Good (>{self.reward_good_threshold:.0f})')
                 ax3.axhline(y=self.reward_poor_threshold, color='red', linestyle='--', 
@@ -369,7 +349,6 @@ class TrainingDashboard:
             ax3.legend(loc='upper left', fontsize=8)
             ax3.grid(True, alpha=0.3)
             
-            # 通信率副轴
             if num_eps > 0:
                 ax3t = ax3.twinx()
                 eps = np.arange(1, num_eps + 1)
@@ -379,7 +358,7 @@ class TrainingDashboard:
                 ax3t.set_ylim(0, 100)
                 ax3t.tick_params(axis='y', labelcolor='#e74c3c')
             
-            # 跟踪误差
+            # Tracking error
             ax4 = axes[1, 1]
             if num_eps > 0:
                 eps = np.arange(1, num_eps + 1)
@@ -399,7 +378,6 @@ class TrainingDashboard:
                 
                 ax4.set_xlim(0, max(num_eps + 1, 10))
                 
-                # 参考线
                 ax4.axhline(y=self.error_good_threshold, color='green', linestyle='--', 
                            alpha=0.5, label=f'Excellent (<{self.error_good_threshold})')
                 ax4.axhline(y=self.error_poor_threshold, color='red', linestyle='--', 
@@ -414,7 +392,7 @@ class TrainingDashboard:
             plt.tight_layout()
             plt.show()
     
-    def finish(self):
+    def finish(self) -> None:
         elapsed = self._get_elapsed()
         
         if self.use_widgets:
@@ -423,7 +401,7 @@ class TrainingDashboard:
             
             with self.log_output:
                 print("=" * 50)
-                print(f"✅ Training Complete!")
+                print(f"Training Complete!")
                 print(f"   Total Time: {self._format_time(elapsed)}")
                 print(f"   Best Reward: {self.best_reward:.2f}")
                 if self.tracking_error_history:
@@ -432,9 +410,9 @@ class TrainingDashboard:
                     print(f"   Final Comm Rate: {self.comm_history[-1]*100:.1f}%")
                 print("=" * 50)
         else:
-            print(f"\n✅ Training complete! Best reward: {self.best_reward:.2f}")
+            print(f"\nTraining complete! Best reward: {self.best_reward:.2f}")
     
-    def get_summary(self):
+    def get_summary(self) -> Dict:
         return {
             'best_reward': self.best_reward,
             'final_reward': self.reward_history[-1] if self.reward_history else None,
