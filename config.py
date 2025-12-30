@@ -1,5 +1,21 @@
-"""
-配置文件 - CTDE 架构
+"""多智能体系统共识控制配置模块。
+
+本模块定义了 CTDE (Centralized Training Decentralized Execution) 架构下
+领导者-跟随者多智能体系统的所有超参数和配置项。
+
+配置分类:
+    - 设备配置: GPU/CPU 设备选择和随机种子
+    - 网络拓扑: 智能体数量和拓扑结构参数
+    - 随机化配置: 领导者轨迹和跟随者状态的随机化范围
+    - 环境参数: 状态/动作维度、时间步长、物理限制
+    - 奖励参数: 跟踪惩罚、通信惩罚、改进奖励的权重
+    - SAC 参数: 学习率、折扣因子、熵系数等
+    - 训练参数: 训练轮数、并行环境数、更新频率
+
+Example:
+    >>> from config import DEVICE, NUM_AGENTS, set_seed
+    >>> set_seed(42)
+    >>> print(f"Using device: {DEVICE}, Agents: {NUM_AGENTS}")
 """
 import torch
 import random
@@ -97,7 +113,14 @@ CRITIC_NUM_LAYERS = 3
 
 
 def set_seed(seed: int = SEED) -> None:
-    """设置全局随机种子"""
+    """设置全局随机种子以确保实验可复现。
+
+    同时设置 Python random、NumPy 和 PyTorch 的随机种子。
+    如果 CUDA 可用，也会设置 CUDA 随机种子。
+
+    Args:
+        seed: 随机种子值，默认使用配置中的 SEED。
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -107,7 +130,10 @@ def set_seed(seed: int = SEED) -> None:
 
 
 def print_config() -> None:
-    """打印配置信息"""
+    """打印当前配置信息到控制台。
+
+    以格式化的方式输出所有主要配置项，便于调试和记录实验设置。
+    """
     print("=" * 60)
     print("Configuration - CTDE Architecture")
     print("=" * 60)
@@ -158,7 +184,11 @@ def print_config() -> None:
 
 
 def get_config_dict() -> dict:
-    """获取配置字典"""
+    """获取所有配置项的字典表示。
+
+    Returns:
+        包含所有配置项键值对的字典，可用于日志记录或序列化。
+    """
     return {
         'device': str(DEVICE),
         'seed': SEED,
